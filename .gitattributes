@@ -1,0 +1,37 @@
+# ------------------------------------------------------
+# .gitattributes for Python projects (cross-platform safe)
+# ------------------------------------------------------
+
+# Automatically normalize text files to LF in repo
+* text=auto
+
+# Python source files
+*.py text eol=lf
+
+# Common text-based data files
+*.csv text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+*.sml text eol=lf
+*.hrm text eol=lf
+
+# Configuration files
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.gitignore text eol=lf
+
+# Binary files (don’t touch line endings)
+*.edf binary
+*.fit binary
+*.acq binary
+*.jpg binary
+*.png binary
+*.pdf binary
+*.exe binary
+
+# Keep notebooks consistent
+*.ipynb text eol=lf
