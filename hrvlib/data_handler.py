@@ -1,4 +1,3 @@
-from __future__ import annotations
 import os
 import json
 import math
@@ -8,8 +7,9 @@ from typing import Optional, List, Dict, Tuple
 import sys
 
 import numpy as np
-from scipy import interpolate
-from scipy.signal import find_peaks
+
+# Import preprocessing module
+from hrvlib.preprocessing import PreprocessingResult, preprocess_rri
 
 # --- Optional dependencies (loaded lazily and handled gracefully) ---
 try:
@@ -59,28 +59,6 @@ class TimeSeries:
     fs: float  # sampling rate in Hz
     units: Optional[str] = None  # e.g., 'mV', 'a.u.'
     start_time: Optional[float] = None  # seconds
-
-
-@dataclass
-class PreprocessingResult:
-    """Results from artifact detection and correction"""
-
-    original_rri: np.ndarray
-    corrected_rri: np.ndarray
-    artifact_indices: List[int]
-    artifact_types: List[str]  # 'missed', 'extra', 'ectopic'
-    interpolation_indices: List[int]
-    correction_method: str
-    stats: Dict
-    correction_details: Optional[Dict[str, List[int]]] = None
-
-    def __post_init__(self):
-        """Initialize correction_details if not provided"""
-        if self.correction_details is None:
-            self.correction_details = {
-                "extra_beats_removed": [],
-                "intervals_interpolated": [],
-            }
 
 
 @dataclass
@@ -171,349 +149,6 @@ def set_interactive_mode(interactive: bool):
     """Set whether to use interactive mode for missing parameters"""
     global INTERACTIVE_MODE
     INTERACTIVE_MODE = interactive
-
-
-# =========================
-# Preprocessing Functions
-# =========================
-
-
-# =========================
-# Preprocessing Functions
-# =========================
-
-
-def detect_artifacts(
-    rri_ms: np.ndarray,
-    threshold_low: float = 300.0,
-    threshold_high: float = 2000.0,
-    ectopic_threshold: float = 0.3,
-) -> Tuple[List[int], List[str]]:
-    """
-    Detect artifacts in RR intervals using threshold-based methods.
-
-    Args:
-        rri_ms: RR intervals in milliseconds
-        threshold_low: Lower threshold for valid RR intervals (ms)
-        threshold_high: Upper threshold for valid RR intervals (ms)
-        ectopic_threshold: Relative threshold for ectopic beat detection
-
-    Returns:
-        Tuple of (artifact_indices, artifact_types)
-    """
-    if len(rri_ms) < 3:
-        return [], []
-
-    artifact_indices = []
-    artifact_types = []
-
-    # Convert to numpy array for easier processing
-    rri = np.asarray(rri_ms, dtype=float)
-
-    # 1. Missed beats (very long intervals)
-    missed_mask = rri > threshold_high
-    missed_indices = np.where(missed_mask)[0].tolist()
-    artifact_indices.extend(missed_indices)
-    artifact_types.extend(["missed"] * len(missed_indices))
-
-    # 2. Extra beats (very short intervals)
-    extra_mask = rri < threshold_low
-    extra_indices = np.where(extra_mask)[0].tolist()
-    artifact_indices.extend(extra_indices)
-    artifact_types.extend(["extra"] * len(extra_indices))
-
-    # 3. Ectopic beats (sudden changes relative to local mean)
-    for i in range(1, len(rri) - 1):
-        if i in artifact_indices:  # Skip already detected artifacts
-            continue
-
-        # Local window analysis
-        window_size = min(5, len(rri) // 4)
-        start_idx = max(0, i - window_size)
-        end_idx = min(len(rri), i + window_size + 1)
-
-        local_rri = rri[start_idx:end_idx]
-        local_rri = local_rri[~np.isin(np.arange(start_idx, end_idx), artifact_indices)]
-
-        if len(local_rri) > 2:
-            local_mean = np.mean(local_rri)
-            relative_change = abs(rri[i] - local_mean) / local_mean
-
-            if relative_change > ectopic_threshold:
-                artifact_indices.append(i)
-                artifact_types.append("ectopic")
-
-    return artifact_indices, artifact_types
-
-
-def correct_extra_beats(
-    rri_ms: np.ndarray, extra_indices: List[int]
-) -> Tuple[np.ndarray, List[int]]:
-    """
-    Correct extra beats by removing them and merging adjacent RR intervals (Kubios method).
-
-    Args:
-        rri_ms: RR intervals in milliseconds
-        extra_indices: Indices of detected extra beats
-
-    Returns:
-        Tuple of (corrected_rri, original_extra_indices_corrected)
-    """
-    if not extra_indices:
-        return rri_ms.copy(), []
-
-    rri = rri_ms.copy()
-    corrected_indices = []
-
-    # Sort indices in descending order to avoid index shifting issues
-    extra_indices_sorted = sorted(set(extra_indices), reverse=True)
-
-    for idx in extra_indices_sorted:
-        if 0 <= idx < len(rri):
-            # For extra beats, we merge the current RR interval with the next one
-            if idx < len(rri) - 1:
-                # Add current interval to next interval (merge them)
-                rri[idx + 1] = rri[idx] + rri[idx + 1]
-                # Remove the current (extra beat) interval
-                rri = np.delete(rri, idx)
-                corrected_indices.append(idx)
-            elif idx == len(rri) - 1 and idx > 0:
-                # If it's the last interval, merge with previous
-                rri[idx - 1] = rri[idx - 1] + rri[idx]
-                rri = np.delete(rri, idx)
-                corrected_indices.append(idx)
-
-    return rri, sorted(corrected_indices)
-
-
-def cubic_spline_interpolation(
-    rri_ms: np.ndarray, artifact_indices: List[int]
-) -> Tuple[np.ndarray, List[int]]:
-    """
-    Correct artifacts using cubic spline interpolation.
-
-    Args:
-        rri_ms: Original RR intervals in milliseconds
-        artifact_indices: Indices of detected artifacts
-
-    Returns:
-        Tuple of (corrected_rri, interpolation_indices)
-    """
-    if not artifact_indices or len(rri_ms) < 4:
-        return rri_ms.copy(), []
-
-    rri = rri_ms.copy()
-    interpolation_indices = []
-
-    # Sort artifact indices
-    artifact_indices = sorted(set(artifact_indices))
-
-    # Create time vector
-    time_cumsum = np.cumsum(rri) / 1000.0  # Convert to seconds
-    time_vector = np.concatenate([[0], time_cumsum[:-1]])
-
-    # Create mask for valid points
-    valid_mask = np.ones(len(rri), dtype=bool)
-    valid_mask[artifact_indices] = False
-
-    if np.sum(valid_mask) < 4:  # Need at least 4 points for cubic spline
-        warnings.warn("Too few valid points for cubic spline interpolation")
-        return rri, []
-
-    # Get valid time points and RR intervals
-    valid_times = time_vector[valid_mask]
-    valid_rri = rri[valid_mask]
-
-    try:
-        # Create cubic spline interpolator
-        cs = interpolate.CubicSpline(valid_times, valid_rri, bc_type="natural")
-
-        # Interpolate at artifact positions
-        for idx in artifact_indices:
-            if 0 <= idx < len(time_vector):
-                rri[idx] = cs(time_vector[idx])
-                interpolation_indices.append(idx)
-
-        # Ensure interpolated values are reasonable
-        rri = np.clip(rri, 200, 3000)  # Physiological limits
-
-    except Exception as e:
-        warnings.warn(f"Cubic spline interpolation failed: {e}")
-        return rri_ms.copy(), []
-
-    return rri, interpolation_indices
-
-
-def preprocess_rri(
-    rri_ms: List[float],
-    threshold_low: float = 300.0,
-    threshold_high: float = 2000.0,
-    ectopic_threshold: float = 0.3,
-    correction_method: str = "cubic_spline",
-) -> PreprocessingResult:
-    """
-    Complete preprocessing pipeline for RR intervals with proper extra beat handling.
-
-    Args:
-        rri_ms: RR intervals in milliseconds
-        threshold_low: Lower threshold for valid RR intervals
-        threshold_high: Upper threshold for valid RR intervals
-        ectopic_threshold: Relative threshold for ectopic detection
-        correction_method: Method for artifact correction
-
-    Returns:
-        PreprocessingResult object with all preprocessing information
-    """
-    if not rri_ms:
-        raise ValueError("No RR intervals provided for preprocessing")
-
-    # Validate input data
-    rri_array = np.asarray(rri_ms, dtype=float)
-
-    # Remove NaN and infinite values
-    valid_mask = np.isfinite(rri_array)
-    if not np.all(valid_mask):
-        warnings.warn(f"Removed {np.sum(~valid_mask)} invalid RR intervals (NaN/inf)")
-        rri_array = rri_array[valid_mask]
-
-    if len(rri_array) == 0:
-        raise ValueError("No valid RR intervals after removing NaN/inf values")
-
-    original_rri = rri_array.copy()
-
-    # Step 1: Detect artifacts
-    artifact_indices, artifact_types = detect_artifacts(
-        rri_array, threshold_low, threshold_high, ectopic_threshold
-    )
-
-    # Step 2: Separate artifact types for different handling
-    extra_indices = [
-        i for i, t in zip(artifact_indices, artifact_types) if t == "extra"
-    ]
-    other_indices = [
-        i for i, t in zip(artifact_indices, artifact_types) if t != "extra"
-    ]
-    other_types = [t for t in artifact_types if t != "extra"]
-
-    # Step 3: Handle extra beats first (removal/merging)
-    corrected_rri = rri_array.copy()
-    extra_corrected_indices = []
-
-    if extra_indices:
-        corrected_rri, extra_corrected_indices = correct_extra_beats(
-            corrected_rri, extra_indices
-        )
-
-        # Adjust indices for remaining artifacts after extra beat removal
-        adjusted_other_indices = []
-        for idx in other_indices:
-            # Count how many extra beats were removed before this index
-            removed_before = sum(
-                1 for e_idx in sorted(extra_corrected_indices) if e_idx <= idx
-            )
-            adjusted_idx = idx - removed_before
-            if 0 <= adjusted_idx < len(corrected_rri):
-                adjusted_other_indices.append(adjusted_idx)
-
-        other_indices = adjusted_other_indices
-
-    # Step 4: Handle missed beats and ectopic beats (interpolation)
-    interpolation_indices = []
-    if other_indices and correction_method == "cubic_spline":
-        corrected_rri, interpolation_indices = cubic_spline_interpolation(
-            corrected_rri, other_indices
-        )
-    elif other_indices and correction_method != "cubic_spline":
-        warnings.warn(f"Unknown correction method: {correction_method}")
-
-    # Step 5: Calculate statistics
-    total_artifacts_detected = len(artifact_indices)
-    total_artifacts_corrected = len(extra_corrected_indices) + len(
-        interpolation_indices
-    )
-
-    stats = {
-        "original_count": len(original_rri),
-        "final_count": len(corrected_rri),
-        "artifacts_detected": total_artifacts_detected,
-        "artifacts_corrected": total_artifacts_corrected,
-        "extra_beats_removed": len(extra_corrected_indices),
-        "intervals_interpolated": len(interpolation_indices),
-        "artifact_percentage": total_artifacts_detected / len(original_rri) * 100,
-        "original_mean": float(np.mean(original_rri)),
-        "corrected_mean": float(np.mean(corrected_rri)),
-        "original_std": float(np.std(original_rri)),
-        "corrected_std": float(np.std(corrected_rri)),
-    }
-
-    # Combine all correction information for the result
-    all_corrected_indices = extra_corrected_indices + interpolation_indices
-    correction_details = {
-        "extra_beats_removed": extra_corrected_indices,
-        "intervals_interpolated": interpolation_indices,
-    }
-
-    return PreprocessingResult(
-        original_rri=original_rri,
-        corrected_rri=corrected_rri,
-        artifact_indices=artifact_indices,
-        artifact_types=artifact_types,
-        interpolation_indices=all_corrected_indices,  # For backward compatibility
-        correction_method=correction_method,
-        stats=stats,
-        correction_details=correction_details,  # New field with detailed correction info
-    )
-
-
-def validate_rri_data(rri_ms: List[float]) -> Tuple[bool, List[str]]:
-    """
-    Validate RR interval data.
-
-    Args:
-        rri_ms: RR intervals in milliseconds
-
-    Returns:
-        Tuple of (is_valid, error_messages)
-    """
-    errors = []
-
-    if not rri_ms:
-        errors.append("No RR intervals provided")
-        return False, errors
-
-    try:
-        rri_array = np.asarray(rri_ms, dtype=float)
-    except (ValueError, TypeError):
-        errors.append("RR intervals must be numeric values")
-        return False, errors
-
-    # Check for NaN or infinite values
-    if not np.all(np.isfinite(rri_array)):
-        nan_count = np.sum(np.isnan(rri_array))
-        inf_count = np.sum(np.isinf(rri_array))
-        errors.append(f"Found {nan_count} NaN and {inf_count} infinite values")
-
-    # Check for negative values
-    negative_count = np.sum(rri_array <= 0)
-    if negative_count > 0:
-        errors.append(f"Found {negative_count} non-positive RR intervals")
-
-    # Check for extremely unrealistic values
-    too_short = np.sum(rri_array < 100)  # < 100ms
-    too_long = np.sum(rri_array > 5000)  # > 5s
-
-    if too_short > 0:
-        errors.append(f"Found {too_short} extremely short RR intervals (< 100ms)")
-    if too_long > 0:
-        errors.append(f"Found {too_long} extremely long RR intervals (> 5s)")
-
-    # Check minimum data length
-    if len(rri_array) < 10:
-        errors.append(
-            f"Too few RR intervals for analysis: {len(rri_array)} (minimum: 10)"
-        )
-
-    return len(errors) == 0, errors
 
 
 # =========================
@@ -675,160 +310,6 @@ def load_rr_file(
     return bundle
 
 
-def _load_txt_manual(path: str) -> DataBundle:
-    """
-    Load TXT file using manual parsing (no pandas required).
-    Handles simple text files with one number per line or space-separated values.
-    """
-    rri_values = []
-
-    with open(path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:  # Skip empty lines
-                continue
-
-            # Skip potential header line if it contains non-numeric characters
-            if line_num == 1:
-                try:
-                    # Try to parse the first line as numbers
-                    test_values = (
-                        line.replace(",", " ")
-                        .replace(";", " ")
-                        .replace("\t", " ")
-                        .split()
-                    )
-                    # If any value can't be converted to float, assume it's a header
-                    for val in test_values:
-                        float(val)
-                except ValueError:
-                    # First line is likely a header, skip it
-                    continue
-
-            # Parse the line for numeric values
-            try:
-                # Handle various separators: comma, semicolon, tab, space
-                values = (
-                    line.replace(",", " ").replace(";", " ").replace("\t", " ").split()
-                )
-                for value_str in values:
-                    value_str = value_str.strip()
-                    if value_str:  # Skip empty strings
-                        try:
-                            value = float(value_str)
-                            if value > 0:  # Only accept positive values for RRI
-                                rri_values.append(value)
-                        except ValueError:
-                            # Skip invalid numeric values
-                            continue
-            except Exception:
-                # Skip problematic lines
-                continue
-
-    if not rri_values:
-        raise ValueError(f"No valid RR intervals found in {path}")
-
-    # Create DataBundle
-    source = SourceInfo(path=path, filetype=".txt", device="Unknown")
-
-    bundle = DataBundle(rri_ms=rri_values, source=source)
-    bundle.meta = {}
-
-    return bundle
-
-
-# =========================
-# Helpers
-# =========================
-
-
-def _require(obj, name: str, how_to_install: str):
-    if obj is None:
-        raise ImportError(
-            f"Missing dependency '{name}'. Install with: {how_to_install}"
-        )
-
-
-def _coerce_float_list(x) -> List[float]:
-    out = []
-    for v in x:
-        try:
-            if v is None or (isinstance(v, float) and math.isnan(v)):
-                continue
-            out.append(float(v))
-        except Exception:
-            continue
-    return out
-
-
-def _label_to_kind(label: str) -> Optional[str]:
-    """
-    Heuristic EDF/ACQ channel labeling → 'ECG' | 'PPG' | 'RESP' | None
-    """
-    if not label:
-        return None
-    s = label.strip().lower()
-    # ECG markers
-    if any(
-        k in s for k in ["ecg", "ii", "v1", "lead", "leads", "mlII", "ml-ii", "ml ii"]
-    ):
-        return "ECG"
-    # PPG markers
-    if any(k in s for k in ["ppg", "pulse", "pleth", "oxim"]):
-        return "PPG"
-    # Resp markers
-    if any(
-        k in s for k in ["resp", "respiration", "thor", "abdo", "breath", "airflow"]
-    ):
-        return "RESP"
-    return None
-
-
-# ---- NeuroKit2 QRS / peak detection ----
-def _extract_intervals_from_waveforms(bundle: DataBundle) -> DataBundle:
-    """
-    If ECG or PPG waveforms exist but no RRI/PPI are provided,
-    run peak detection to derive intervals (ms).
-    """
-    try:
-        import neurokit2 as nk
-    except ImportError:
-        warnings.warn(
-            "neurokit2 not installed; cannot derive RRI/PPI from waveforms. Run: pip install neurokit2"
-        )
-        return bundle
-
-    # ECG → RRI
-    if bundle.ecg and not bundle.rri_ms:
-        ecg0 = bundle.ecg[0]  # take first ECG channel
-        try:
-            signals, info = nk.ecg_process(ecg0.data, sampling_rate=ecg0.fs)
-            rpeaks = info.get("ECG_R_Peaks", [])
-            if len(rpeaks) > 1:
-                rr = np.diff(rpeaks) / ecg0.fs * 1000.0  # convert samples → ms
-                bundle.rri_ms = rr.tolist()
-                bundle.meta["ecg_peak_method"] = "neurokit2.ecg_process"
-        except Exception as e:
-            warnings.warn(f"ECG peak detection failed: {e}")
-
-    # PPG → PPI
-    if bundle.ppg and not bundle.ppi_ms:
-        ppg0 = bundle.ppg[0]
-        try:
-            signals, info = nk.ppg_process(ppg0.data, sampling_rate=ppg0.fs)
-            peaks = info.get("PPG_Peaks", [])
-            if peaks is not None and len(peaks) > 1:
-                ppi = np.diff(peaks) / ppg0.fs * 1000.0
-                bundle.ppi_ms = ppi.tolist()
-                bundle.meta["ppg_peak_method"] = "neurokit2.ppg_process"
-            else:
-                warnings.warn("No PPG peaks detected; cannot derive PPI.")
-        except Exception as e:
-            warnings.warn(f"PPG peak detection failed: {e}")
-
-    return bundle
-
-
 # =========================
 # Loaders per format
 # =========================
@@ -853,13 +334,28 @@ def _load_csv(path: str, df_override=None) -> DataBundle:
     fs_global = None
     if "fs" in cols:
         try:
-            values = df[cols["fs"]].dropna().unique()
-            if len(values) == 1:  # constant fs
-                fs_global = float(values[0])
-                bundle.meta["fs"] = fs_global  # <-- always propagate
-            else:
-                fs_global = None
-                warnings.warn("Multiple or invalid fs values in CSV; ignoring.")
+            # Get non-empty fs values and check if they're consistent
+            fs_values = df[cols["fs"]].dropna()
+            fs_values = fs_values[fs_values != ""]  # Remove empty strings
+
+            if len(fs_values) > 0:
+                unique_values = fs_values.unique()
+                # Remove empty strings and convert to float
+                numeric_values = []
+                for val in unique_values:
+                    if val != "" and val is not None:
+                        try:
+                            numeric_values.append(float(val))
+                        except (ValueError, TypeError):
+                            pass
+
+                if len(numeric_values) == 1:  # Single consistent fs value
+                    fs_global = numeric_values[0]
+                    bundle.meta["fs"] = fs_global
+                elif len(numeric_values) > 1:
+                    # Multiple different fs values - this is problematic
+                    warnings.warn("Multiple or invalid fs values in CSV; ignoring.")
+                # else: no valid numeric fs values found, fs_global remains None
         except Exception:
             pass
 
@@ -873,12 +369,17 @@ def _load_csv(path: str, df_override=None) -> DataBundle:
                 # Check for signal-specific fs column
                 if f"fs_{kind}" in cols:
                     try:
-                        fs = float(df.iloc[0][cols[f"fs_{kind}"]])
+                        fs_specific_values = df[cols[f"fs_{kind}"]].dropna()
+                        fs_specific_values = fs_specific_values[
+                            fs_specific_values != ""
+                        ]
+                        if len(fs_specific_values) > 0:
+                            fs = float(fs_specific_values.iloc[0])
                     except Exception:
                         pass
 
                 # Try to infer from time vector if no fs found
-                if not fs and "t" in cols:  # try infer from time vector
+                if not fs and "t" in cols:
                     t = _coerce_float_list(df[cols["t"]].tolist())
                     if len(t) > 2:
                         dt = np.median(np.diff(t))
@@ -900,7 +401,8 @@ def _load_csv(path: str, df_override=None) -> DataBundle:
                 )
                 getattr(bundle, kind).append(ts)
                 # propagate fs to bundle.meta for summary/strict checks
-                bundle.meta["fs"] = fs
+                if "fs" not in bundle.meta:
+                    bundle.meta["fs"] = fs
 
     # Fallback: single column → treat as RRI in ms
     if not (bundle.rri_ms or bundle.ppi_ms or bundle.ecg or bundle.ppg or bundle.resp):
@@ -1165,3 +667,185 @@ def check_dependencies() -> Dict[str, bool]:
         "scipy": True,  # scipy is required, not optional
         "numpy": True,  # numpy is required, not optional
     }
+
+
+def _load_txt_manual(path: str) -> DataBundle:
+    """
+    Load TXT file using manual parsing (no pandas required).
+    Handles simple text files with one number per line or space-separated values.
+    """
+    rri_values = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:  # Skip empty lines
+                continue
+
+            # Skip potential header line if it contains non-numeric characters
+            if line_num == 1:
+                try:
+                    # Try to parse the first line as numbers
+                    test_values = (
+                        line.replace(",", " ")
+                        .replace(";", " ")
+                        .replace("\t", " ")
+                        .split()
+                    )
+                    # If any value can't be converted to float, assume it's a header
+                    for val in test_values:
+                        float(val)
+                except ValueError:
+                    # First line is likely a header, skip it
+                    continue
+
+            # Parse the line for numeric values
+            try:
+                # Handle various separators: comma, semicolon, tab, space
+                values = (
+                    line.replace(",", " ").replace(";", " ").replace("\t", " ").split()
+                )
+                for value_str in values:
+                    value_str = value_str.strip()
+                    if value_str:  # Skip empty strings
+                        try:
+                            value = float(value_str)
+                            if value > 0:  # Only accept positive values for RRI
+                                rri_values.append(value)
+                        except ValueError:
+                            # Skip invalid numeric values
+                            continue
+            except Exception:
+                # Skip problematic lines
+                continue
+
+    if not rri_values:
+        raise ValueError(f"No valid RR intervals found in {path}")
+
+    # Create DataBundle
+    source = SourceInfo(path=path, filetype=".txt", device="Unknown")
+
+    bundle = DataBundle(rri_ms=rri_values, source=source)
+    bundle.meta = {}
+
+    return bundle
+
+
+# =========================
+# Helpers
+# =========================
+
+
+def _require(obj, name: str, how_to_install: str):
+    if obj is None:
+        raise ImportError(
+            f"Missing dependency '{name}'. Install with: {how_to_install}"
+        )
+
+
+def _coerce_float_list(x) -> List[float]:
+    out = []
+    for v in x:
+        try:
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                continue
+            out.append(float(v))
+        except Exception:
+            continue
+    return out
+
+
+def _label_to_kind(label: str) -> Optional[str]:
+    """
+    Heuristic EDF/ACQ channel labeling → 'ECG' | 'PPG' | 'RESP' | None
+    """
+    if not label:
+        return None
+    s = label.strip().lower()
+    # ECG markers
+    if any(
+        k in s for k in ["ecg", "ii", "v1", "lead", "leads", "mlII", "ml-ii", "ml ii"]
+    ):
+        return "ECG"
+    # PPG markers
+    if any(k in s for k in ["ppg", "pulse", "pleth", "oxim"]):
+        return "PPG"
+    # Resp markers
+    if any(
+        k in s for k in ["resp", "respiration", "thor", "abdo", "breath", "airflow"]
+    ):
+        return "RESP"
+    return None
+
+
+# ---- NeuroKit2 QRS / peak detection ----
+def _extract_intervals_from_waveforms(bundle: DataBundle) -> DataBundle:
+    """
+    If ECG or PPG waveforms exist but no RRI/PPI are provided,
+    run peak detection to derive intervals (ms).
+    """
+    try:
+        import neurokit2 as nk
+    except ImportError:
+        warnings.warn(
+            "neurokit2 not installed; cannot derive RRI/PPI from waveforms. Run: pip install neurokit2"
+        )
+        return bundle
+
+    # ECG → RRI
+    if bundle.ecg and not bundle.rri_ms:
+        ecg0 = bundle.ecg[0]  # take first ECG channel
+        try:
+            # Check if signal is long enough for processing
+            if len(ecg0.data) < 100:  # Minimum reasonable signal length
+                warnings.warn(
+                    "ECG signal too short for peak detection; skipping RRI extraction"
+                )
+                return bundle
+
+            # Check sampling rate is reasonable
+            if ecg0.fs <= 0 or ecg0.fs > 10000:
+                warnings.warn(
+                    f"Invalid sampling rate {ecg0.fs} Hz for ECG; skipping RRI extraction"
+                )
+                return bundle
+
+            signals, info = nk.ecg_process(ecg0.data, sampling_rate=ecg0.fs)
+            rpeaks = info.get("ECG_R_Peaks", [])
+            if len(rpeaks) > 1:
+                rr = np.diff(rpeaks) / ecg0.fs * 1000.0  # convert samples → ms
+                bundle.rri_ms = rr.tolist()
+                bundle.meta["ecg_peak_method"] = "neurokit2.ecg_process"
+        except Exception as e:
+            warnings.warn(f"ECG peak detection failed: {e}")
+
+    # PPG → PPI
+    if bundle.ppg and not bundle.ppi_ms:
+        ppg0 = bundle.ppg[0]
+        try:
+            # Check if signal is long enough for processing
+            if len(ppg0.data) < 100:  # Minimum reasonable signal length
+                warnings.warn(
+                    "PPG signal too short for peak detection; skipping PPI extraction"
+                )
+                return bundle
+
+            # Check sampling rate is reasonable
+            if ppg0.fs <= 0 or ppg0.fs > 10000:
+                warnings.warn(
+                    f"Invalid sampling rate {ppg0.fs} Hz for PPG; skipping PPI extraction"
+                )
+                return bundle
+
+            signals, info = nk.ppg_process(ppg0.data, sampling_rate=ppg0.fs)
+            peaks = info.get("PPG_Peaks", [])
+            if peaks is not None and len(peaks) > 1:
+                ppi = np.diff(peaks) / ppg0.fs * 1000.0
+                bundle.ppi_ms = ppi.tolist()
+                bundle.meta["ppg_peak_method"] = "neurokit2.ppg_process"
+
+            else:
+                warnings.warn("No PPG peaks detected; cannot derive PPI.")
+        except Exception as e:
+            warnings.warn(f"PPG peak detection failed: {e}")
+    return bundle

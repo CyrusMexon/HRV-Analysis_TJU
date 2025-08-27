@@ -16,23 +16,19 @@ try:
         DataBundle,
         TimeSeries,
         SourceInfo,
-        PreprocessingResult,
-        detect_artifacts,
-        correct_extra_beats,
-        cubic_spline_interpolation,
-        preprocess_rri,
-        validate_rri_data,
         load_rr_file,
         _coerce_float_list,
         _label_to_kind,
         set_interactive_mode,
         get_supported_formats,
         check_dependencies,
+        load_and_preprocess,
     )
+    from hrvlib.preprocessing import PreprocessingResult
 except ImportError as e:
-    print(f"Failed to import hrvlib.data_handler: {e}")
+    print(f"Failed to import hrvlib modules: {e}")
     print(
-        "Make sure hrvlib.data_handler.py is in the parent directory of the tests folder"
+        "Make sure hrvlib.data_handler.py and hrvlib.preprocessing.py are in the parent directory of the tests folder"
     )
     raise
 
@@ -67,339 +63,40 @@ class TestDataStructures(unittest.TestCase):
         self.assertEqual(summary["rri_overview"]["n_RRI"], 5)
         self.assertAlmostEqual(summary["rri_overview"]["mean_RRI_ms"], 824.0)
 
+    def test_data_bundle_with_preprocessing(self):
+        """Test DataBundle summary with preprocessing results"""
+        rri = [800, 850, 900, 750, 820]
+        bundle = DataBundle(rri_ms=rri)
 
-class TestPreprocessingFunctions(unittest.TestCase):
-    """Test artifact detection and correction functions"""
+        # Mock preprocessing result
+        mock_preprocessing = MagicMock(spec=PreprocessingResult)
+        mock_preprocessing.artifact_indices = [1, 3]
+        mock_preprocessing.artifact_types = ["extra", "missed"]
+        mock_preprocessing.correction_method = "cubic_spline"
+        mock_preprocessing.interpolation_indices = [1, 3]
 
-    def setUp(self):
-        """Set up test data"""
-        # Normal RR intervals around 800ms
-        self.normal_rri = np.array([800, 820, 850, 830, 810, 825, 840, 815, 835, 822])
+        bundle.preprocessing = mock_preprocessing
 
-        # RR intervals with artifacts - ensuring clear missed beats above 2000ms threshold
-        self.rri_with_artifacts = np.array(
-            [
-                800,
-                820,
-                2500,  # missed beat at index 2 (very long, > 2000ms)
-                200,  # extra beat at index 3 (very short, < 300ms)
-                830,
-                810,
-                2200,  # another missed beat at index 6 (long, > 2000ms)
-                825,
-                840,
-                815,
-            ]
-        )
+        summary = bundle.summary()
+        self.assertIsNotNone(summary["preprocessing"])
+        self.assertEqual(summary["preprocessing"]["artifacts_detected"], 2)
+        self.assertEqual(summary["preprocessing"]["correction_method"], "cubic_spline")
 
-        # RR intervals with ectopic beats
-        self.rri_with_ectopic = np.array(
-            [
-                800,
-                820,
-                850,
-                1200,  # ectopic (sudden jump)
-                830,
-                810,
-                825,
-                500,  # ectopic (sudden drop)
-                840,
-                815,
-                835,
-            ]
-        )
+    def test_data_bundle_with_waveforms(self):
+        """Test DataBundle with waveform data"""
+        ecg_data = np.random.randn(1000)
+        ppg_data = np.random.randn(500)
 
-        # RR intervals with multiple extra beats for testing removal
-        self.rri_with_extra_beats = np.array(
-            [
-                800,
-                820,
-                150,  # extra beat at index 2
-                250,  # extra beat at index 3
-                830,
-                810,
-                180,  # extra beat at index 6
-                825,
-                840,
-                815,
-            ]
-        )
+        ecg_ts = TimeSeries(name="ECG", data=ecg_data, fs=1000.0)
+        ppg_ts = TimeSeries(name="PPG", data=ppg_data, fs=500.0)
 
-    def test_detect_artifacts_normal_data(self):
-        """Test artifact detection with normal data"""
-        indices, types = detect_artifacts(self.normal_rri)
-        self.assertEqual(len(indices), 0)
-        self.assertEqual(len(types), 0)
+        bundle = DataBundle(ecg=[ecg_ts], ppg=[ppg_ts])
 
-    def test_detect_artifacts_with_missed_beats(self):
-        """Test detection of missed beats (long intervals)"""
-        indices, types = detect_artifacts(self.rri_with_artifacts)
-
-        missed_indices = [i for i, t in zip(indices, types) if t == "missed"]
-
-        # The test data has intervals > 2000ms (default threshold) at indices 2 and 6
-        # Verify that values above threshold are detected
-        for i, val in enumerate(self.rri_with_artifacts):
-            if val > 2000:  # Default threshold_high
-                self.assertIn(
-                    i,
-                    missed_indices,
-                    f"Index {i} has value {val}ms > 2000ms, should be detected as missed beat",
-                )
-
-        # Should detect exactly 2 missed beats (at indices 2 and 6)
-        self.assertEqual(
-            len(missed_indices),
-            2,
-            f"Expected 2 missed beats, got {len(missed_indices)}",
-        )
-        self.assertIn(2, missed_indices)  # 2500ms interval
-        self.assertIn(6, missed_indices)  # 2200ms interval
-
-    def test_detect_artifacts_with_extra_beats(self):
-        """Test detection of extra beats (short intervals)"""
-        indices, types = detect_artifacts(self.rri_with_artifacts)
-
-        # Should detect extra beat at index 3
-        extra_indices = [i for i, t in zip(indices, types) if t == "extra"]
-        self.assertIn(3, extra_indices)  # 200ms interval
-
-    def test_detect_artifacts_with_ectopic_beats(self):
-        """Test detection of ectopic beats"""
-        indices, types = detect_artifacts(self.rri_with_ectopic, ectopic_threshold=0.3)
-
-        # Should detect ectopic beats
-        ectopic_indices = [i for i, t in zip(indices, types) if t == "ectopic"]
-        self.assertGreater(len(ectopic_indices), 0)
-
-    def test_correct_extra_beats_single(self):
-        """Test correction of a single extra beat"""
-        test_rri = np.array([800, 820, 200, 830, 810])  # extra beat at index 2
-        corrected, corrected_indices = correct_extra_beats(test_rri, [2])
-
-        # Should have one fewer interval after correction
-        self.assertEqual(len(corrected), len(test_rri) - 1)
-        self.assertEqual(corrected_indices, [2])
-
-        # The extra beat interval should be merged with the next one
-        # Original: [800, 820, 200, 830, 810] -> [800, 820, 1030, 810]
-        expected = np.array([800, 820, 1030, 810])  # 200 + 830 = 1030
-        np.testing.assert_array_equal(corrected, expected)
-
-    def test_correct_extra_beats_multiple(self):
-        """Test correction of multiple extra beats"""
-        test_rri = np.array([800, 150, 820, 180, 830])  # extra beats at indices 1, 3
-        corrected, corrected_indices = correct_extra_beats(test_rri, [1, 3])
-
-        # Should have two fewer intervals after correction
-        self.assertEqual(len(corrected), len(test_rri) - 2)
-        self.assertEqual(sorted(corrected_indices), [1, 3])
-
-    def test_correct_extra_beats_edge_cases(self):
-        """Test extra beat correction edge cases"""
-        # Extra beat at end of series
-        test_rri = np.array([800, 820, 830, 150])  # extra beat at last position
-        corrected, corrected_indices = correct_extra_beats(test_rri, [3])
-
-        # Should merge with previous interval
-        expected = np.array([800, 820, 980])  # 830 + 150 = 980
-        np.testing.assert_array_equal(corrected, expected)
-
-        # No extra beats
-        test_rri = np.array([800, 820, 830])
-        corrected, corrected_indices = correct_extra_beats(test_rri, [])
-        np.testing.assert_array_equal(corrected, test_rri)
-        self.assertEqual(corrected_indices, [])
-
-    def test_cubic_spline_interpolation(self):
-        """Test cubic spline interpolation"""
-        test_rri = np.array(
-            [800, 820, 2500, 1200, 830, 810]
-        )  # artifacts at indices 2, 3
-        artifact_indices = [2, 3]
-
-        corrected, interp_indices = cubic_spline_interpolation(
-            test_rri, artifact_indices
-        )
-
-        # Should interpolate at artifact positions
-        self.assertEqual(set(interp_indices), set(artifact_indices))
-
-        # Interpolated values should be more reasonable
-        self.assertLess(corrected[2], 2000)  # Should be less than original 2500
-        self.assertLess(corrected[3], 1000)  # Should be less than original 1200
-        self.assertGreater(corrected[2], 600)  # Should be reasonable
-        self.assertGreater(corrected[3], 600)  # Should be reasonable
-
-    def test_cubic_spline_interpolation_edge_cases(self):
-        """Test cubic spline interpolation edge cases"""
-        # Too few points
-        short_rri = np.array([800, 820])
-        corrected, interp_indices = cubic_spline_interpolation(short_rri, [1])
-        np.testing.assert_array_equal(corrected, short_rri)
-        self.assertEqual(len(interp_indices), 0)
-
-        # No artifacts
-        normal_rri = np.array([800, 820, 850, 830])
-        corrected, interp_indices = cubic_spline_interpolation(normal_rri, [])
-        np.testing.assert_array_equal(corrected, normal_rri)
-        self.assertEqual(len(interp_indices), 0)
-
-    def test_preprocess_rri_complete_pipeline(self):
-        """Test complete preprocessing pipeline"""
-        result = preprocess_rri(self.rri_with_artifacts.tolist())
-
-        self.assertIsInstance(result, PreprocessingResult)
-        self.assertGreater(len(result.artifact_indices), 0)
-        self.assertGreater(len(result.artifact_types), 0)
-        self.assertEqual(result.correction_method, "cubic_spline")
-
-        # Check statistics
-        self.assertIn("original_count", result.stats)
-        self.assertIn("final_count", result.stats)
-        self.assertIn("artifacts_detected", result.stats)
-        self.assertIn("artifacts_corrected", result.stats)
-        self.assertIn("extra_beats_removed", result.stats)
-        self.assertIn("intervals_interpolated", result.stats)
-        self.assertIn("artifact_percentage", result.stats)
-
-        # Check that extra beats were properly removed (reducing count)
-        # Original has 10 intervals, should have fewer after extra beat removal
-        self.assertLess(result.stats["final_count"], result.stats["original_count"])
-
-    def test_preprocess_rri_extra_beats_only(self):
-        """Test preprocessing pipeline with only extra beats"""
-        result = preprocess_rri(self.rri_with_extra_beats.tolist())
-
-        # Should detect and remove extra beats
-        extra_count = sum(1 for t in result.artifact_types if t == "extra")
-        self.assertGreater(extra_count, 0)
-
-        # Final count should be less than original due to extra beat removal
-        self.assertLess(result.stats["final_count"], result.stats["original_count"])
-        self.assertEqual(result.stats["extra_beats_removed"], extra_count)
-
-        # Should have correction details
-        self.assertIn(
-            "correction_details", result.__dict__ if hasattr(result, "__dict__") else {}
-        )
-
-    def test_preprocess_rri_mixed_artifacts(self):
-        """Test preprocessing with mixed artifact types"""
-        # Create data with all types: missed, extra, and ectopic
-        mixed_rri = np.array(
-            [
-                800,
-                820,
-                2500,  # missed beat at index 2
-                150,  # extra beat at index 3
-                830,
-                810,
-                825,
-                1200,  # ectopic beat at index 7 (sudden jump)
-                840,
-                815,
-            ]
-        )
-
-        result = preprocess_rri(mixed_rri.tolist())
-
-        # Should detect all types
-        artifact_types_set = set(result.artifact_types)
-        self.assertIn("missed", artifact_types_set)
-        self.assertIn("extra", artifact_types_set)
-
-        # Should have both removals and interpolations
-        self.assertGreater(result.stats["extra_beats_removed"], 0)
-        # Note: interpolation count might be 0 if only extra beats after adjustment
-
-        # Final count should reflect extra beat removals
-        expected_final_count = len(mixed_rri) - result.stats["extra_beats_removed"]
-        self.assertEqual(result.stats["final_count"], expected_final_count)
-
-    def test_preprocess_rri_empty_input(self):
-        """Test preprocessing with empty input"""
-        with self.assertRaises(ValueError):
-            preprocess_rri([])
-
-    def test_preprocess_rri_invalid_data(self):
-        """Test preprocessing with invalid data"""
-        # All NaN values
-        with self.assertRaises(ValueError):
-            preprocess_rri([float("nan")] * 5)
-
-    def test_index_adjustment_after_extra_beat_removal(self):
-        """Test that artifact indices are properly adjusted after extra beat removal"""
-        # Create data where removing extra beats affects subsequent artifact indices
-        test_rri = np.array(
-            [
-                800,
-                820,
-                150,  # extra beat at index 2
-                850,
-                830,
-                180,  # extra beat at index 5
-                810,
-                825,
-                2500,  # missed beat at index 8 (will become index 6 after removals)
-                840,
-                815,
-            ]
-        )
-
-        result = preprocess_rri(test_rri.tolist())
-
-        # Verify that all artifacts were detected initially
-        self.assertGreater(len(result.artifact_indices), 0)
-
-        # Check that the pipeline completed successfully
-        self.assertEqual(result.stats["original_count"], len(test_rri))
-        self.assertLess(result.stats["final_count"], result.stats["original_count"])
-
-
-class TestValidationFunctions(unittest.TestCase):
-    """Test data validation functions"""
-
-    def test_validate_rri_data_valid(self):
-        """Test validation with valid RRI data"""
-        valid_rri = [800, 820, 850, 830, 810, 825, 840, 815, 835, 822]
-        is_valid, errors = validate_rri_data(valid_rri)
-        self.assertTrue(is_valid)
-        self.assertEqual(len(errors), 0)
-
-    def test_validate_rri_data_empty(self):
-        """Test validation with empty data"""
-        is_valid, errors = validate_rri_data([])
-        self.assertFalse(is_valid)
-        self.assertIn("No RR intervals provided", errors[0])
-
-    def test_validate_rri_data_invalid_values(self):
-        """Test validation with invalid values"""
-        # NaN values
-        invalid_rri = [800, float("nan"), 850, 830]
-        is_valid, errors = validate_rri_data(invalid_rri)
-        self.assertFalse(is_valid)
-        self.assertTrue(any("NaN" in error for error in errors))
-
-        # Negative values
-        invalid_rri = [800, -100, 850, 830]
-        is_valid, errors = validate_rri_data(invalid_rri)
-        self.assertFalse(is_valid)
-        self.assertTrue(any("non-positive" in error for error in errors))
-
-        # Extremely short/long values
-        invalid_rri = [50, 6000, 850, 830]  # 50ms too short, 6000ms too long
-        is_valid, errors = validate_rri_data(invalid_rri)
-        self.assertFalse(is_valid)
-        self.assertTrue(any("extremely short" in error for error in errors))
-        self.assertTrue(any("extremely long" in error for error in errors))
-
-    def test_validate_rri_data_too_few_points(self):
-        """Test validation with too few data points"""
-        short_rri = [800, 850, 830]  # Less than 10 points
-        is_valid, errors = validate_rri_data(short_rri)
-        self.assertFalse(is_valid)
-        self.assertTrue(any("Too few RR intervals" in error for error in errors))
+        summary = bundle.summary()
+        self.assertIn("ECG", summary["types_loaded"])
+        self.assertIn("PPG", summary["types_loaded"])
+        self.assertEqual(summary["waveform_channels"]["ECG_channels"], 1)
+        self.assertEqual(summary["waveform_channels"]["PPG_channels"], 1)
 
 
 class TestHelperFunctions(unittest.TestCase):
@@ -412,27 +109,49 @@ class TestHelperFunctions(unittest.TestCase):
         expected = [1.0, 2.5, 4.7]
         self.assertEqual(result, expected)
 
+    def test_coerce_float_list_empty(self):
+        """Test _coerce_float_list with empty input"""
+        result = _coerce_float_list([])
+        self.assertEqual(result, [])
+
+    def test_coerce_float_list_all_invalid(self):
+        """Test _coerce_float_list with all invalid values"""
+        invalid_input = [None, "invalid", float("nan")]
+        result = _coerce_float_list(invalid_input)
+        self.assertEqual(result, [])
+
     def test_label_to_kind(self):
         """Test _label_to_kind function"""
         # ECG labels
         self.assertEqual(_label_to_kind("ECG_I"), "ECG")
         self.assertEqual(_label_to_kind("Lead II"), "ECG")
         self.assertEqual(_label_to_kind("ml-ii"), "ECG")
+        self.assertEqual(_label_to_kind("v1"), "ECG")
 
         # PPG labels
         self.assertEqual(_label_to_kind("PPG"), "PPG")
         self.assertEqual(_label_to_kind("Pulse"), "PPG")
         self.assertEqual(_label_to_kind("Plethysmograph"), "PPG")
+        self.assertEqual(_label_to_kind("oxim"), "PPG")
 
         # RESP labels
         self.assertEqual(_label_to_kind("Respiration"), "RESP")
         self.assertEqual(_label_to_kind("Thoracic"), "RESP")
         self.assertEqual(_label_to_kind("Breath"), "RESP")
+        self.assertEqual(_label_to_kind("airflow"), "RESP")
 
         # Unknown labels
         self.assertIsNone(_label_to_kind("Unknown"))
         self.assertIsNone(_label_to_kind(""))
         self.assertIsNone(_label_to_kind(None))
+
+    def test_label_to_kind_case_insensitive(self):
+        """Test that _label_to_kind is case insensitive"""
+        self.assertEqual(_label_to_kind("ECG"), "ECG")
+        self.assertEqual(_label_to_kind("ecg"), "ECG")
+        self.assertEqual(_label_to_kind("Ecg"), "ECG")
+        self.assertEqual(_label_to_kind("PPG"), "PPG")
+        self.assertEqual(_label_to_kind("ppg"), "PPG")
 
 
 class TestFileLoading(unittest.TestCase):
@@ -477,6 +196,57 @@ class TestFileLoading(unittest.TestCase):
 
             bundle = load_rr_file(csv_path)
             self.assertEqual(len(bundle.rri_ms), len(self.test_rri))
+
+    def test_load_csv_file_with_waveform_data(self):
+        """Test loading CSV file with waveform data"""
+        csv_path = os.path.join(self.temp_dir, "test_waveform.csv")
+
+        # Create test CSV with ECG data
+        ecg_data = np.sin(np.linspace(0, 4 * np.pi, 1000))  # Synthetic ECG-like data
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["ECG", "fs"])
+            for i, ecg_val in enumerate(ecg_data):
+                fs_val = 1000 if i == 0 else ""  # Only write fs in first row
+                writer.writerow([ecg_val, fs_val])
+
+        # Test loading
+        with patch("hrvlib.data_handler.pd") as mock_pd:
+            mock_df = MagicMock()
+            mock_df.columns = ["ECG", "fs"]
+
+            # Mock the column access behavior
+
+        def mock_getitem(col):
+            if col == "ECG":
+                mock_series = MagicMock()
+                mock_series.tolist.return_value = ecg_data.tolist()
+                return mock_series
+            elif col == "fs":
+                # Create fs column with 1000 in first position, empty strings elsewhere
+                fs_values = [1000] + [""] * (len(ecg_data) - 1)
+                mock_series = MagicMock()
+
+                # Mock the iteration behavior for the fs column parsing
+                mock_series.__iter__ = lambda: iter(fs_values)
+                return mock_series
+            return MagicMock()
+
+        mock_df.__getitem__ = mock_getitem
+        mock_pd.read_csv.return_value = mock_df
+
+        # Disable neurokit2 to avoid the peak detection warning
+        with patch(
+            "hrvlib.data_handler._extract_intervals_from_waveforms"
+        ) as mock_extract:
+            mock_extract.side_effect = lambda bundle: bundle
+
+            bundle = load_rr_file(csv_path)
+
+            self.assertEqual(len(bundle.ecg), 1)
+            self.assertEqual(bundle.ecg[0].fs, 1000.0)
+            self.assertEqual(len(bundle.ecg[0].data), 1000)
 
     def test_load_txt_file(self):
         """Test loading TXT file with RRI data"""
@@ -534,6 +304,23 @@ class TestFileLoading(unittest.TestCase):
 
         self.assertEqual(len(bundle.rri_ms), len(self.test_rri))
 
+    def test_load_txt_file_with_header(self):
+        """Test loading TXT file with non-numeric header"""
+        txt_path = os.path.join(self.temp_dir, "test_header.txt")
+
+        # Create test TXT with header
+        with open(txt_path, "w") as f:
+            f.write("RR_Intervals_ms\n")  # Non-numeric header
+            for rri in self.test_rri:
+                f.write(f"{rri}\n")
+
+        # Force use of manual TXT parsing
+        with patch("hrvlib.data_handler.pd", None):
+            bundle = load_rr_file(txt_path)
+
+        # Should skip header and load data correctly
+        self.assertEqual(len(bundle.rri_ms), len(self.test_rri))
+
     def test_load_json_file(self):
         """Test loading JSON file (Movesense format)"""
         json_path = os.path.join(self.temp_dir, "test.json")
@@ -545,6 +332,26 @@ class TestFileLoading(unittest.TestCase):
 
         bundle = load_rr_file(json_path)
         self.assertEqual(len(bundle.rri_ms), len(self.test_rri))
+
+    def test_load_json_file_nested_format(self):
+        """Test loading JSON file with nested samples format"""
+        json_path = os.path.join(self.temp_dir, "test_nested.json")
+
+        # Create test JSON with nested structure
+        test_data = {
+            "samples": [
+                {"rr": self.test_rri[0]},
+                {"rr": self.test_rri[1]},
+                {"rr": self.test_rri[2]},
+                {"rr": self.test_rri[3]},
+                {"rr": self.test_rri[4]},
+            ]
+        }
+        with open(json_path, "w") as f:
+            json.dump(test_data, f)
+
+        bundle = load_rr_file(json_path)
+        self.assertEqual(len(bundle.rri_ms), 5)  # First 5 values
 
     def test_load_nonexistent_file(self):
         """Test loading non-existent file"""
@@ -561,6 +368,51 @@ class TestFileLoading(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             load_rr_file(unsupported_path)
+
+    def test_load_file_with_auto_preprocessing(self):
+        """Test loading file with automatic preprocessing"""
+        csv_path = os.path.join(self.temp_dir, "test_preprocess.csv")
+
+        # Create CSV with some artifacts
+        test_rri_with_artifacts = [800, 820, 2500, 200, 830, 810, 825, 840, 815, 835]
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["RRI"])
+            for rri in test_rri_with_artifacts:
+                writer.writerow([rri])
+
+        # Test with pandas mocked
+        with patch("hrvlib.data_handler.pd") as mock_pd:
+            mock_df = MagicMock()
+            mock_df.columns = ["RRI"]
+            mock_df.__getitem__.return_value.tolist.return_value = (
+                test_rri_with_artifacts
+            )
+            mock_pd.read_csv.return_value = mock_df
+
+            bundle = load_rr_file(csv_path, auto_preprocess=True)
+
+            # Should have preprocessing results
+            self.assertIsNotNone(bundle.preprocessing)
+            self.assertIsInstance(bundle.preprocessing, PreprocessingResult)
+            self.assertTrue(bundle.meta.get("preprocessing_applied", False))
+
+    def test_load_file_source_info_generation(self):
+        """Test that source info is properly generated"""
+        txt_path = os.path.join(self.temp_dir, "test_source.txt")
+
+        with open(txt_path, "w") as f:
+            for rri in self.test_rri:
+                f.write(f"{rri}\n")
+
+        with patch("hrvlib.data_handler.pd", None):
+            bundle = load_rr_file(txt_path)
+
+        # Should have source info
+        self.assertIsNotNone(bundle.source)
+        self.assertEqual(bundle.source.path, txt_path)
+        self.assertEqual(bundle.source.filetype, ".txt")
 
 
 class TestConfigurationFunctions(unittest.TestCase):
@@ -608,52 +460,76 @@ class TestConfigurationFunctions(unittest.TestCase):
         self.assertIsInstance(deps["pyedflib"], bool)
         self.assertIsInstance(deps["fitparse"], bool)
         self.assertIsInstance(deps["bioread"], bool)
+        self.assertIsInstance(deps["xml.etree.ElementTree"], bool)
+
+    def test_check_dependencies_structure(self):
+        """Test that check_dependencies returns expected structure"""
+        deps = check_dependencies()
+
+        expected_keys = {
+            "pandas",
+            "pyedflib",
+            "fitparse",
+            "xml.etree.ElementTree",
+            "bioread",
+            "scipy",
+            "numpy",
+        }
+
+        self.assertEqual(set(deps.keys()), expected_keys)
+
+        # All values should be boolean
+        for key, value in deps.items():
+            self.assertIsInstance(value, bool, f"Dependency {key} should be boolean")
 
 
-class TestIntegrationScenarios(unittest.TestCase):
-    """Test integration scenarios and edge cases"""
+class TestConvenienceFunctions(unittest.TestCase):
+    """Test convenience functions"""
 
-    def test_load_and_preprocess_integration(self):
-        """Test complete load and preprocess pipeline"""
-        temp_dir = tempfile.mkdtemp()
-        csv_path = os.path.join(temp_dir, "test.csv")
+    def setUp(self):
+        """Set up temporary files for testing"""
+        self.temp_dir = tempfile.mkdtemp()
+        self.test_rri = [800, 820, 2500, 200, 830, 810, 825, 840, 815, 835]
 
-        # Create CSV with artifacts
-        test_rri = [800, 820, 2500, 200, 830, 810, 825, 840, 815, 835]
+    def tearDown(self):
+        """Clean up temporary files"""
+        import shutil
 
-        try:
-            with open(csv_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["RRI"])
-                for rri in test_rri:
-                    writer.writerow([rri])
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-            # Test with pandas mocked
-            with patch("hrvlib.data_handler.pd") as mock_pd:
-                mock_df = MagicMock()
-                mock_df.columns = ["RRI"]
-                mock_df.__getitem__.return_value.tolist.return_value = test_rri
-                mock_pd.read_csv.return_value = mock_df
+    def test_load_and_preprocess_function(self):
+        """Test load_and_preprocess convenience function"""
+        csv_path = os.path.join(self.temp_dir, "test.csv")
 
-                bundle = load_rr_file(csv_path, auto_preprocess=True)
+        # Create test CSV with artifacts
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["RRI"])
+            for rri in self.test_rri:
+                writer.writerow([rri])
 
-                # Should have preprocessing results
-                self.assertIsNotNone(bundle.preprocessing)
-                self.assertGreater(len(bundle.preprocessing.artifact_indices), 0)
+        # Test with pandas mocked
+        with patch("hrvlib.data_handler.pd") as mock_pd:
+            mock_df = MagicMock()
+            mock_df.columns = ["RRI"]
+            mock_df.__getitem__.return_value.tolist.return_value = self.test_rri
+            mock_pd.read_csv.return_value = mock_df
 
-                # RRI should be corrected
-                corrected_rri = np.array(bundle.rri_ms)
-                self.assertTrue(np.all(corrected_rri > 300))  # No very short intervals
-                self.assertTrue(np.all(corrected_rri < 2000))  # No very long intervals
+            bundle = load_and_preprocess(csv_path)
 
-        finally:
-            import shutil
+            # Should have preprocessing applied automatically
+            self.assertIsNotNone(bundle.preprocessing)
+            self.assertTrue(bundle.meta.get("preprocessing_applied", False))
 
-            shutil.rmtree(temp_dir, ignore_errors=True)
+    def test_load_and_preprocess_with_custom_params(self):
+        """Test load_and_preprocess with custom preprocessing parameters"""
+        csv_path = os.path.join(self.temp_dir, "test_custom.csv")
 
-    def test_preprocessing_with_custom_parameters(self):
-        """Test preprocessing with custom parameters"""
-        test_rri = [800, 820, 1800, 250, 830, 810]  # Contains artifacts
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["RRI"])
+            for rri in self.test_rri:
+                writer.writerow([rri])
 
         custom_params = {
             "threshold_low": 400.0,
@@ -661,13 +537,145 @@ class TestIntegrationScenarios(unittest.TestCase):
             "ectopic_threshold": 0.2,
         }
 
-        result = preprocess_rri(test_rri, **custom_params)
+        # Test with pandas mocked
+        with patch("hrvlib.data_handler.pd") as mock_pd:
+            mock_df = MagicMock()
+            mock_df.columns = ["RRI"]
+            mock_df.__getitem__.return_value.tolist.return_value = self.test_rri
+            mock_pd.read_csv.return_value = mock_df
 
-        self.assertIsInstance(result, PreprocessingResult)
-        self.assertEqual(result.stats["original_count"], len(test_rri))
+            bundle = load_and_preprocess(csv_path, preprocessing_params=custom_params)
 
-        # With stricter thresholds, should detect more artifacts
-        self.assertGreater(len(result.artifact_indices), 0)
+            # Should have preprocessing applied with custom parameters
+            self.assertIsNotNone(bundle.preprocessing)
+            self.assertEqual(bundle.preprocessing.correction_method, "cubic_spline")
+
+
+class TestIntegrationScenarios(unittest.TestCase):
+    """Test integration scenarios and edge cases"""
+
+    def setUp(self):
+        """Set up temporary files for testing"""
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        """Clean up temporary files"""
+        import shutil
+
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_load_and_preprocess_integration(self):
+        """Test complete load and preprocess pipeline"""
+        csv_path = os.path.join(self.temp_dir, "test.csv")
+
+        # Create CSV with artifacts
+        test_rri = [800, 820, 2500, 200, 830, 810, 825, 840, 815, 835]
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["RRI"])
+            for rri in test_rri:
+                writer.writerow([rri])
+
+        # Test with pandas mocked
+        with patch("hrvlib.data_handler.pd") as mock_pd:
+            mock_df = MagicMock()
+            mock_df.columns = ["RRI"]
+            mock_df.__getitem__.return_value.tolist.return_value = test_rri
+            mock_pd.read_csv.return_value = mock_df
+
+            bundle = load_rr_file(csv_path, auto_preprocess=True)
+
+            # Should have preprocessing results
+            self.assertIsNotNone(bundle.preprocessing)
+            self.assertGreater(len(bundle.preprocessing.artifact_indices), 0)
+
+            # RRI should be corrected
+            corrected_rri = np.array(bundle.rri_ms)
+            self.assertTrue(np.all(corrected_rri > 300))  # No very short intervals
+            self.assertTrue(np.all(corrected_rri < 2000))  # No very long intervals
+
+    def test_error_handling_preprocessing_failure(self):
+        """Test graceful handling of preprocessing failures"""
+        csv_path = os.path.join(self.temp_dir, "test_preprocess_fail.csv")
+
+        # Create CSV with valid data
+        test_rri = [800, 820, 850, 830, 810]
+
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["RRI"])
+            for rri in test_rri:
+                writer.writerow([rri])
+
+        # Mock preprocessing to fail
+        with patch("hrvlib.data_handler.pd") as mock_pd, patch(
+            "hrvlib.data_handler.preprocess_rri"
+        ) as mock_preprocess:
+
+            mock_df = MagicMock()
+            mock_df.columns = ["RRI"]
+            mock_df.__getitem__.return_value.tolist.return_value = test_rri
+            mock_pd.read_csv.return_value = mock_df
+
+            # Make preprocessing raise an exception
+            mock_preprocess.side_effect = Exception("Preprocessing failed")
+
+            # Should not raise exception, but warn and continue
+            with self.assertWarns(UserWarning):
+                bundle = load_rr_file(csv_path, auto_preprocess=True)
+
+            # Should still have loaded the data
+            self.assertEqual(len(bundle.rri_ms), len(test_rri))
+            self.assertIsNone(bundle.preprocessing)
+
+    def test_bundle_summary_comprehensive(self):
+        """Test comprehensive bundle summary with multiple data types"""
+        # Create bundle with multiple data types
+        rri = [800, 820, 850, 830, 810]
+        ppi = [750, 780, 820, 790, 760]
+
+        ecg_data = np.random.randn(1000)
+        ppg_data = np.random.randn(500)
+        resp_data = np.random.randn(200)
+
+        ecg_ts = TimeSeries(name="ECG", data=ecg_data, fs=1000.0, units="mV")
+        ppg_ts = TimeSeries(name="PPG", data=ppg_data, fs=500.0, units="a.u.")
+        resp_ts = TimeSeries(name="RESP", data=resp_data, fs=100.0, units="a.u.")
+
+        source = SourceInfo(path="/test/path.csv", filetype=".csv", device="TestDevice")
+
+        bundle = DataBundle(
+            rri_ms=rri,
+            ppi_ms=ppi,
+            ecg=[ecg_ts],
+            ppg=[ppg_ts],
+            resp=[resp_ts],
+            source=source,
+            meta={"device": "TestDevice", "fs": 1000},
+        )
+
+        summary = bundle.summary()
+
+        # Check all data types are represented
+        expected_types = {"RRI", "PPI", "ECG", "PPG", "RESP"}
+        self.assertEqual(set(summary["types_loaded"]), expected_types)
+
+        # Check channel counts
+        self.assertEqual(summary["waveform_channels"]["ECG_channels"], 1)
+        self.assertEqual(summary["waveform_channels"]["PPG_channels"], 1)
+        self.assertEqual(summary["waveform_channels"]["RESP_channels"], 1)
+
+        # Check RRI/PPI overviews
+        self.assertIsNotNone(summary["rri_overview"])
+        self.assertIsNotNone(summary["ppi_overview"])
+        self.assertEqual(summary["rri_overview"]["n_RRI"], 5)
+        self.assertEqual(summary["ppi_overview"]["n_PPI"], 5)
+
+        # Check source info
+        self.assertIsNotNone(summary["source"])
+        self.assertEqual(summary["source"]["path"], "/test/path.csv")
+        self.assertEqual(summary["source"]["device"], "TestDevice")
 
 
 if __name__ == "__main__":
