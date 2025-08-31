@@ -1,3 +1,22 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# IDE / Editor settings
+.vscode/
+.idea/
+
+# OS-specific junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test artifacts
+project_structure.txt
