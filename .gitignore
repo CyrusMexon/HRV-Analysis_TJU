@@ -1,6 +1,8 @@
 __pycache__/
+*.py[cod]
 *.pyc
 .pytest_cache/
+pycache__/__init__.cpython-311.pyc
 
 # Virtual environment
 .venv/
