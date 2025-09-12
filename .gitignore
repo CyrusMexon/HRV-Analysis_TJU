@@ -22,3 +22,9 @@ Thumbs.db
 
 # Test artifacts
 project_structure.txt
+project_components.txt
+pipeline_trace.txt
+
+# Utility scripts
+scan_components.py
+trace_pipeline.py
