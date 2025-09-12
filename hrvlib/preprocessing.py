@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 
 import numpy as np
-from scipy import interpolate
+from scipy import interpolate, signal
 from scipy.signal import find_peaks
 
 
@@ -19,6 +19,8 @@ class PreprocessingResult:
     correction_method: str
     stats: Dict
     correction_details: Optional[Dict[str, List[int]]] = None
+    noise_segments: Optional[List[Tuple[int, int]]] = None  # New: noisy segments
+    quality_flags: Optional[Dict[str, bool]] = None  # New: quality indicators
 
     def __post_init__(self):
         """Initialize correction_details if not provided"""
@@ -27,6 +29,125 @@ class PreprocessingResult:
                 "extra_beats_removed": [],
                 "intervals_interpolated": [],
             }
+        if self.noise_segments is None:
+            self.noise_segments = []
+        if self.quality_flags is None:
+            self.quality_flags = {
+                "high_noise": False,
+                "excessive_artifacts": False,
+                "poor_signal_quality": False,
+                "irregular_rhythm": False,
+            }
+
+
+def detect_noise_segments(
+    rri_ms: np.ndarray,
+    noise_threshold: float = 2.0,
+    window_size: int = 10,
+    min_segment_length: int = 3,
+) -> List[Tuple[int, int]]:
+    """
+    FR-8: Detect noisy or incomplete data segments using statistical methods.
+
+    Args:
+        rri_ms: RR intervals in milliseconds
+        noise_threshold: Z-score threshold for noise detection
+        window_size: Size of sliding window for noise assessment
+        min_segment_length: Minimum length of noise segment to report
+
+    Returns:
+        List of (start_idx, end_idx) tuples for noisy segments
+    """
+    if len(rri_ms) < window_size:
+        return []
+
+    noise_segments = []
+
+    # Calculate rolling statistics
+    half_window = window_size // 2
+    noise_scores = np.zeros(len(rri_ms))
+
+    for i in range(len(rri_ms)):
+        start_idx = max(0, i - half_window)
+        end_idx = min(len(rri_ms), i + half_window + 1)
+        window_data = rri_ms[start_idx:end_idx]
+
+        if len(window_data) > 2:
+            # Calculate local variability metrics
+            local_std = np.std(window_data)
+            local_median = np.median(window_data)
+
+            # Detect excessive variability
+            cv = local_std / (local_median + 1e-10)  # Coefficient of variation
+
+            # Detect sudden jumps
+            if i > 0:
+                jump_ratio = abs(rri_ms[i] - rri_ms[i - 1]) / (local_median + 1e-10)
+                noise_scores[i] = max(cv * 10, jump_ratio * 5)
+            else:
+                noise_scores[i] = cv * 10
+
+    # Identify noisy regions using threshold
+    noisy_mask = noise_scores > noise_threshold
+
+    # Find contiguous noisy segments
+    if np.any(noisy_mask):
+        diff_mask = np.diff(np.concatenate([[False], noisy_mask, [False]]).astype(int))
+        starts = np.where(diff_mask == 1)[0]
+        ends = np.where(diff_mask == -1)[0]
+
+        for start, end in zip(starts, ends):
+            if end - start >= min_segment_length:
+                noise_segments.append((int(start), int(end)))
+
+    return noise_segments
+
+
+def assess_signal_quality(
+    rri_ms: np.ndarray,
+    artifact_percentage: float,
+    noise_segments: List[Tuple[int, int]],
+) -> Dict[str, bool]:
+    """
+    Assess overall signal quality and set quality flags.
+
+    Args:
+        rri_ms: RR intervals in milliseconds
+        artifact_percentage: Percentage of artifacts detected
+        noise_segments: List of noisy segments
+
+    Returns:
+        Dictionary of quality flags
+    """
+    flags = {
+        "high_noise": False,
+        "excessive_artifacts": False,
+        "poor_signal_quality": False,
+        "irregular_rhythm": False,
+    }
+
+    # Check noise level
+    total_noise_samples = sum(end - start for start, end in noise_segments)
+    noise_percentage = (
+        (total_noise_samples / len(rri_ms)) * 100 if len(rri_ms) > 0 else 0
+    )
+
+    flags["high_noise"] = noise_percentage > 15.0  # >15% noisy segments
+    flags["excessive_artifacts"] = artifact_percentage > 5.0  # >5% artifacts
+
+    # Assess rhythm regularity using coefficient of variation
+    if len(rri_ms) > 0:
+        cv = np.std(rri_ms) / np.mean(rri_ms)
+        flags["irregular_rhythm"] = (
+            cv > 0.45
+        )  # High variability might indicate AF/irregular rhythm
+
+    # Overall quality assessment
+    flags["poor_signal_quality"] = (
+        flags["high_noise"] or flags["excessive_artifacts"] or noise_percentage > 25.0
+    )
+
+    return flags
 
 
 def detect_artifacts(
@@ -196,9 +317,10 @@ def preprocess_rri(
     threshold_high: float = 2000.0,
     ectopic_threshold: float = 0.3,
     correction_method: str = "cubic_spline",
+    noise_detection: bool = True,
 ) -> PreprocessingResult:
     """
-    Complete preprocessing pipeline for RR intervals with proper extra beat handling.
+    Complete preprocessing pipeline for RR intervals with proper extra beat handling and noise detection.
 
     Args:
         rri_ms: RR intervals in milliseconds
@@ -206,6 +328,7 @@ def preprocess_rri(
         threshold_high: Upper threshold for valid RR intervals
         ectopic_threshold: Relative threshold for ectopic detection
         correction_method: Method for artifact correction
+        noise_detection: Whether to perform noise detection (FR-8)
 
     Returns:
         PreprocessingResult object with all preprocessing information
@@ -227,12 +350,19 @@ def preprocess_rri(
 
     original_rri = rri_array.copy()
 
-    # Step 1: Detect artifacts
+    # Step 1: Noise detection (FR-8)
+    noise_segments = []
+    if noise_detection:
+        noise_segments = detect_noise_segments(rri_array)
+        if noise_segments:
+            warnings.warn(f"Detected {len(noise_segments)} noisy segments in the data")
+
+    # Step 2: Detect artifacts
     artifact_indices, artifact_types = detect_artifacts(
         rri_array, threshold_low, threshold_high, ectopic_threshold
     )
 
-    # Step 2: Separate artifact types for different handling
+    # Step 3: Separate artifact types for different handling
     extra_indices = [
         i for i, t in zip(artifact_indices, artifact_types) if t == "extra"
     ]
@@ -241,7 +371,7 @@ def preprocess_rri(
     ]
     other_types = [t for t in artifact_types if t != "extra"]
 
-    # Step 3: Handle extra beats first (removal/merging)
+    # Step 4: Handle extra beats first (removal/merging)
     corrected_rri = rri_array.copy()
     extra_corrected_indices = []
 
@@ -263,7 +393,7 @@ def preprocess_rri(
 
         other_indices = adjusted_other_indices
 
-    # Step 4: Handle missed beats and ectopic beats (interpolation)
+    # Step 5: Handle missed beats and ectopic beats (interpolation)
     interpolation_indices = []
     if other_indices and correction_method == "cubic_spline":
         corrected_rri, interpolation_indices = cubic_spline_interpolation(
@@ -272,10 +402,16 @@ def preprocess_rri(
     elif other_indices and correction_method != "cubic_spline":
         warnings.warn(f"Unknown correction method: {correction_method}")
 
-    # Step 5: Calculate statistics
+    # Step 6: Calculate statistics
     total_artifacts_detected = len(artifact_indices)
     total_artifacts_corrected = len(extra_corrected_indices) + len(
         interpolation_indices
+    )
+    artifact_percentage = total_artifacts_detected / len(original_rri) * 100
+
+    # Step 7: Assess signal quality
+    quality_flags = assess_signal_quality(
+        original_rri, artifact_percentage, noise_segments
     )
 
     stats = {
@@ -285,7 +421,12 @@ def preprocess_rri(
         "artifacts_corrected": total_artifacts_corrected,
         "extra_beats_removed": len(extra_corrected_indices),
         "intervals_interpolated": len(interpolation_indices),
-        "artifact_percentage": total_artifacts_detected / len(original_rri) * 100,
+        "artifact_percentage": artifact_percentage,
+        "noise_segments_count": len(noise_segments),
+        "noise_percentage": (
+            sum(end - start for start, end in noise_segments) / len(original_rri)
+        )
+        * 100,
         "original_mean": float(np.mean(original_rri)),
         "corrected_mean": float(np.mean(corrected_rri)),
         "original_std": float(np.std(original_rri)),
@@ -307,7 +448,9 @@ def preprocess_rri(
         interpolation_indices=all_corrected_indices,  # For backward compatibility
         correction_method=correction_method,
         stats=stats,
-        correction_details=correction_details,  # New field with detailed correction info
+        correction_details=correction_details,
+        noise_segments=noise_segments,
+        quality_flags=quality_flags,
     )
 
 

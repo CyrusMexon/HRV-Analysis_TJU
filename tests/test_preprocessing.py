@@ -15,6 +15,8 @@ try:
         cubic_spline_interpolation,
         preprocess_rri,
         validate_rri_data,
+        detect_noise_segments,  # New function
+        assess_signal_quality,  # New function
     )
 except ImportError as e:
     print(f"Failed to import hrvlib.preprocessing: {e}")
@@ -78,6 +80,58 @@ class TestPreprocessingFunctions(unittest.TestCase):
                 825,
                 840,
                 815,
+            ]
+        )
+
+        # RR intervals with high noise/variability for noise detection
+        self.noisy_rri = np.array(
+            [
+                800,
+                900,
+                400,
+                1200,
+                300,
+                1500,
+                200,
+                1000,
+                850,
+                600,
+                1300,
+                450,
+                900,
+                1100,
+                350,
+                800,
+                820,
+                830,
+                810,
+                825,
+            ]
+        )
+
+        # RR intervals with irregular rhythm (high CV)
+        self.irregular_rri = np.array(
+            [
+                400,
+                1200,
+                600,
+                1000,
+                500,
+                1400,
+                300,
+                1100,
+                550,
+                950,
+                450,
+                1300,
+                350,
+                1150,
+                400,
+                1000,
+                500,
+                900,
+                600,
+                800,
             ]
         )
 
@@ -223,6 +277,14 @@ class TestPreprocessingFunctions(unittest.TestCase):
         # Original has 10 intervals, should have fewer after extra beat removal
         self.assertLess(result.stats["final_count"], result.stats["original_count"])
 
+        # Check new statistics fields
+        self.assertIn("noise_segments_count", result.stats)
+        self.assertIn("noise_percentage", result.stats)
+
+        # Check new fields in result
+        self.assertIsNotNone(result.noise_segments)
+        self.assertIsNotNone(result.quality_flags)
+
     def test_preprocess_rri_extra_beats_only(self):
         """Test preprocessing pipeline with only extra beats"""
         result = preprocess_rri(self.rri_with_extra_beats.tolist())
@@ -330,6 +392,165 @@ class TestPreprocessingFunctions(unittest.TestCase):
         # With stricter thresholds, should detect more artifacts
         self.assertGreater(len(result.artifact_indices), 0)
 
+    def test_preprocess_rri_with_noise_detection_disabled(self):
+        """Test preprocessing with noise detection disabled"""
+        result = preprocess_rri(self.noisy_rri.tolist(), noise_detection=False)
+
+        # Should have empty noise segments when noise detection is disabled
+        self.assertEqual(len(result.noise_segments), 0)
+        self.assertEqual(result.stats["noise_segments_count"], 0)
+        self.assertEqual(result.stats["noise_percentage"], 0)
+
+
+class TestNoiseDetectionFunctions(unittest.TestCase):
+    """Test new noise detection functionality"""
+
+    def setUp(self):
+        """Set up test data for noise detection"""
+        # Normal RR intervals with low variability
+        self.clean_rri = np.array([800, 820, 830, 810, 825, 840, 815, 835, 822, 818])
+
+        # RR intervals with noisy segments (high variability)
+        self.noisy_rri = np.array(
+            [
+                800,
+                900,
+                400,
+                1200,
+                300,
+                1500,
+                200,
+                1000,  # noisy segment
+                850,
+                830,
+                810,
+                825,
+                840,
+                815,
+                835,
+                822,  # clean segment
+                300,
+                1400,
+                250,
+                1300,
+                400,
+                1100,  # another noisy segment
+            ]
+        )
+
+        # RR intervals with sudden jumps
+        self.jumpy_rri = np.array([800, 820, 830, 810, 825, 1500, 300, 840, 815, 835])
+
+    def test_detect_noise_segments_clean_data(self):
+        """Test noise detection with clean data"""
+        noise_segments = detect_noise_segments(self.clean_rri)
+
+        # Should detect no noise in clean data
+        self.assertEqual(len(noise_segments), 0)
+
+    def test_detect_noise_segments_noisy_data(self):
+        """Test noise detection with noisy data"""
+        noise_segments = detect_noise_segments(self.noisy_rri, noise_threshold=1.5)
+
+        # Should detect noise segments
+        self.assertGreater(len(noise_segments), 0)
+
+        # Check that detected segments are tuples with start and end indices
+        for segment in noise_segments:
+            self.assertIsInstance(segment, tuple)
+            self.assertEqual(len(segment), 2)
+            start, end = segment
+            self.assertIsInstance(start, int)
+            self.assertIsInstance(end, int)
+            self.assertLess(start, end)
+
+    def test_detect_noise_segments_custom_parameters(self):
+        """Test noise detection with custom parameters"""
+        # Test with more sensitive threshold
+        noise_segments_sensitive = detect_noise_segments(
+            self.noisy_rri, noise_threshold=1.0, window_size=5, min_segment_length=2
+        )
+
+        # Test with less sensitive threshold
+        noise_segments_tolerant = detect_noise_segments(
+            self.noisy_rri, noise_threshold=3.0, window_size=15, min_segment_length=5
+        )
+
+        # More sensitive should detect more or equal noise
+        self.assertGreaterEqual(
+            len(noise_segments_sensitive), len(noise_segments_tolerant)
+        )
+
+    def test_detect_noise_segments_edge_cases(self):
+        """Test noise detection edge cases"""
+        # Too few data points
+        short_rri = np.array([800, 820])
+        noise_segments = detect_noise_segments(short_rri, window_size=10)
+        self.assertEqual(len(noise_segments), 0)
+
+        # Empty array
+        empty_rri = np.array([])
+        noise_segments = detect_noise_segments(empty_rri)
+        self.assertEqual(len(noise_segments), 0)
+
+    def test_detect_noise_segments_sudden_jumps(self):
+        """Test noise detection with sudden jumps"""
+        noise_segments = detect_noise_segments(self.jumpy_rri, noise_threshold=2.0)
+
+        # Should detect the sudden jump regions
+        self.assertGreater(len(noise_segments), 0)
+
+    def test_assess_signal_quality_clean_signal(self):
+        """Test signal quality assessment with clean signal"""
+        quality_flags = assess_signal_quality(
+            self.clean_rri, artifact_percentage=2.0, noise_segments=[]
+        )
+
+        # Should have good quality flags
+        self.assertFalse(quality_flags["high_noise"])
+        self.assertFalse(quality_flags["excessive_artifacts"])
+        self.assertFalse(quality_flags["poor_signal_quality"])
+        self.assertFalse(quality_flags["irregular_rhythm"])
+
+    def test_assess_signal_quality_poor_signal(self):
+        """Test signal quality assessment with poor signal"""
+        # Create noise segments that cover >15% of data
+        noise_segments = [(0, 5), (10, 15)]  # 10 out of 20 samples = 50%
+
+        quality_flags = assess_signal_quality(
+            self.noisy_rri,
+            artifact_percentage=8.0,  # >5% artifacts
+            noise_segments=noise_segments,
+        )
+
+        # Should flag as poor quality
+        self.assertTrue(quality_flags["high_noise"])
+        self.assertTrue(quality_flags["excessive_artifacts"])
+        self.assertTrue(quality_flags["poor_signal_quality"])
+
+    def test_assess_signal_quality_irregular_rhythm(self):
+        """Test signal quality assessment with irregular rhythm"""
+        # Create highly variable RRI data (high CV)
+        irregular_rri = np.array([400, 1200, 600, 1000, 500, 1400, 300, 1100])
+
+        quality_flags = assess_signal_quality(
+            irregular_rri, artifact_percentage=1.0, noise_segments=[]
+        )
+
+        # Should detect irregular rhythm
+        self.assertTrue(quality_flags["irregular_rhythm"])
+
+    def test_assess_signal_quality_edge_cases(self):
+        """Test signal quality assessment edge cases"""
+        # Empty RRI array
+        quality_flags = assess_signal_quality(
+            np.array([]), artifact_percentage=0.0, noise_segments=[]
+        )
+
+        # Should handle empty array gracefully
+        self.assertFalse(quality_flags["high_noise"])
+        self.assertFalse(quality_flags["excessive_artifacts"])
+
 
 class TestValidationFunctions(unittest.TestCase):
     """Test data validation functions"""
@@ -374,6 +595,129 @@ class TestValidationFunctions(unittest.TestCase):
         is_valid, errors = validate_rri_data(short_rri)
         self.assertFalse(is_valid)
         self.assertTrue(any("Too few RR intervals" in error for error in errors))
+
+
+class TestPreprocessingResultDataclass(unittest.TestCase):
+    """Test PreprocessingResult dataclass with new fields"""
+
+    def test_preprocessing_result_initialization(self):
+        """Test PreprocessingResult initialization with new fields"""
+        original_rri = np.array([800, 820, 850])
+        corrected_rri = np.array([800, 820, 850])
+
+        # Test with all new fields
+        result = PreprocessingResult(
+            original_rri=original_rri,
+            corrected_rri=corrected_rri,
+            artifact_indices=[],
+            artifact_types=[],
+            interpolation_indices=[],
+            correction_method="cubic_spline",
+            stats={},
+            noise_segments=[(0, 2)],
+            quality_flags={"high_noise": True, "poor_signal_quality": True},
+        )
+
+        self.assertEqual(result.noise_segments, [(0, 2)])
+        self.assertTrue(result.quality_flags["high_noise"])
+        self.assertIsNotNone(result.correction_details)
+
+    def test_preprocessing_result_post_init(self):
+        """Test PreprocessingResult __post_init__ method"""
+        original_rri = np.array([800, 820, 850])
+        corrected_rri = np.array([800, 820, 850])
+
+        # Test without optional fields (should be initialized by __post_init__)
+        result = PreprocessingResult(
+            original_rri=original_rri,
+            corrected_rri=corrected_rri,
+            artifact_indices=[],
+            artifact_types=[],
+            interpolation_indices=[],
+            correction_method="cubic_spline",
+            stats={},
+        )
+
+        # Should initialize optional fields
+        self.assertIsNotNone(result.correction_details)
+        self.assertIsNotNone(result.noise_segments)
+        self.assertIsNotNone(result.quality_flags)
+        self.assertEqual(result.noise_segments, [])
+        self.assertIn("high_noise", result.quality_flags)
+        self.assertIn("excessive_artifacts", result.quality_flags)
+        self.assertIn("poor_signal_quality", result.quality_flags)
+        self.assertIn("irregular_rhythm", result.quality_flags)
+
+
+class TestIntegratedNoiseDetectionPipeline(unittest.TestCase):
+    """Test integration of noise detection with preprocessing pipeline"""
+
+    def setUp(self):
+        """Set up test data for integrated testing"""
+        # Data with both artifacts and noise
+        self.mixed_quality_rri = np.array(
+            [
+                800,
+                900,
+                400,
+                1200,
+                300,  # noisy segment
+                2500,  # missed beat
+                150,  # extra beat
+                830,
+                810,
+                825,
+                840,
+                815,  # clean segment
+                300,
+                1400,
+                250,
+                1300,  # another noisy segment
+                835,
+                822,
+            ]
+        )
+
+    def test_integrated_preprocessing_with_noise_detection(self):
+        """Test complete preprocessing pipeline with noise detection enabled"""
+        result = preprocess_rri(self.mixed_quality_rri.tolist(), noise_detection=True)
+
+        # Should detect both artifacts and noise
+        self.assertGreater(len(result.artifact_indices), 0)
+        self.assertGreater(len(result.noise_segments), 0)
+
+        # Should have noise statistics
+        self.assertGreater(result.stats["noise_segments_count"], 0)
+        self.assertGreater(result.stats["noise_percentage"], 0)
+
+        # Should have quality flags
+        self.assertIsNotNone(result.quality_flags)
+
+        # Poor quality signal should be flagged
+        self.assertTrue(
+            result.quality_flags["poor_signal_quality"]
+            or result.quality_flags["high_noise"]
+            or result.quality_flags["excessive_artifacts"]
+        )
+
+    def test_integrated_preprocessing_quality_flags_correlation(self):
+        """Test that quality flags correlate with detected issues"""
+        result = preprocess_rri(self.mixed_quality_rri.tolist(), noise_detection=True)
+
+        # If high artifact percentage, should flag excessive artifacts
+        if result.stats["artifact_percentage"] > 5.0:
+            self.assertTrue(result.quality_flags["excessive_artifacts"])
+
+        # If high noise percentage, should flag high noise
+        if result.stats["noise_percentage"] > 15.0:
+            self.assertTrue(result.quality_flags["high_noise"])
+
+        # If either high noise or excessive artifacts, should flag poor quality
+        if (
+            result.quality_flags["high_noise"]
+            or result.quality_flags["excessive_artifacts"]
+        ):
+            self.assertTrue(result.quality_flags["poor_signal_quality"])
 
 
 if __name__ == "__main__":

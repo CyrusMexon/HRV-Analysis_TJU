@@ -3,463 +3,716 @@ import scipy.stats
 import scipy.spatial
 import scipy.special
 from typing import Tuple, Optional, List, Dict, Union
+import warnings
+
+# Import from existing modules to maintain consistency
+from hrvlib.data_handler import DataBundle, TimeSeries
+from hrvlib.preprocessing import PreprocessingResult, preprocess_rri
 
 
 class NonlinearHRVAnalysis:
     """
-    非线性HRV分析工具集
-    实现Poincaré分析、样本熵、多尺度熵、DFA和RQA
-    符合科研和企业级精度要求
+    Nonlinear HRV analysis toolkit integrated with DataBundle
+    Implements PoincarÃƒÂ© analysis, Sample Entropy, Multiscale Entropy, DFA and RQA
+    Uses preprocessing.py for data cleaning instead of internal preprocessing
+    Meets research and enterprise-level accuracy requirements
     """
 
-    @staticmethod
-    def preprocess_rr(rr_intervals: np.ndarray,
-                      outlier_threshold: float = 3.0,
-                      interpolation_method: str = 'cubic',
-                      max_correction_percentage: float = 5.0) -> Tuple[np.ndarray, float]:
+    def __init__(
+        self,
+        bundle: DataBundle,
+        use_preprocessing: bool = True,
+        preprocessing_params: Optional[Dict] = None,
+        analysis_window: Optional[Tuple[float, float]] = None,
+    ):
         """
-        RR间期数据预处理：异常值检测和校正
+        Initialize nonlinear HRV analyzer with DataBundle integration
 
-        参数:
-        rr_intervals: RR间期序列(毫秒)
-        outlier_threshold: 异常值检测阈值(标准差倍数)
-        interpolation_method: 插值方法 ('linear'或'cubic')
-        max_correction_percentage: 最大允许校正百分比
-
-        返回:
-        cleaned_rr: 清理后的RR间期序列
-        corrected_percentage: 校正的心搏百分比
+        Args:
+            bundle: DataBundle containing RRI data and preprocessing results
+            use_preprocessing: Whether to use/apply preprocessing
+            preprocessing_params: Parameters for preprocessing if needed
+            analysis_window: (start_time, end_time) in seconds for analysis window
         """
-        # 输入验证
-        if not isinstance(rr_intervals, np.ndarray):
-            raise TypeError("输入必须是numpy数组")
-        if rr_intervals.ndim != 1:
-            raise ValueError("输入必须是一维数组")
-        if len(rr_intervals) < 10:
-            raise ValueError("RR间期序列至少需要10个点")
-        if interpolation_method not in ['linear', 'cubic']:
-            raise ValueError("插值方法必须是'linear'或'cubic'")
+        self.bundle = bundle
+        self.use_preprocessing = use_preprocessing
+        self.analysis_window = analysis_window
+        self.preprocessing_params = preprocessing_params or {}
 
-        n = len(rr_intervals)
-        original_rr = rr_intervals.copy()
-        corrected_flags = np.zeros(n, dtype=bool)  # 标记校正点
-        corrected_count = 0
+        # Extract RRI data with proper preprocessing integration
+        self.rr_ms, self.preprocessing_result = self._extract_rri_data()
 
-        # 初始异常值检测
-        median = np.median(rr_intervals)
-        mad = scipy.stats.median_abs_deviation(rr_intervals, scale='normal')
+        if len(self.rr_ms) < 10:
+            raise ValueError("At least 10 RR intervals needed for nonlinear analysis")
 
-        # 计算动态阈值
-        lower_bound = median - outlier_threshold * mad
-        upper_bound = median + outlier_threshold * mad
+        # Validate data quality
+        self._validate_data_quality()
 
-        # 创建处理后的数组
-        processed = rr_intervals.copy()
-
-        # 迭代校正异常值
-        for i in range(len(processed)):
-            if processed[i] < lower_bound or processed[i] > upper_bound:
-                corrected_flags[i] = True
-                corrected_count += 1
-
-                # 基于相邻点动态插值
-                prev_val = processed[i - 1] if i > 0 else median
-                next_val = processed[i + 1] if i < len(processed) - 1 else median
-
-                if interpolation_method == 'linear':
-                    # 线性插值
-                    processed[i] = (prev_val + next_val) / 2
-                else:  # 三次样条插值
-                    # 使用加权平均作为简化的三次样条近似
-                    processed[i] = (prev_val * 0.4 + next_val * 0.6)
-
-        # 二次检查确保所有值在合理范围内
-        q1, q3 = np.percentile(processed, [25, 75])
-        iqr = q3 - q1
-        final_lower = q1 - 1.5 * iqr
-        final_upper = q3 + 1.5 * iqr
-
-        # 替换极端值
-        extreme_mask = (processed < final_lower) | (processed > final_upper)
-        if np.any(extreme_mask):
-            median_val = np.median(processed)
-            processed[extreme_mask] = median_val
-            # 更新校正计数
-            new_corrections = np.sum(~corrected_flags & extreme_mask)
-            corrected_count += new_corrections
-            corrected_flags |= extreme_mask
-
-        # 计算校正百分比
-        corrected_percentage = (corrected_count / n) * 100
-
-        # 如果校正百分比超过阈值，发出警告
-        if corrected_percentage > max_correction_percentage:
-            print(f"警告：校正心搏百分比({corrected_percentage:.2f}%)超过阈值({max_correction_percentage}%)")
-
-        return processed, corrected_percentage
-
-    @staticmethod
-    def poincare_analysis(rr_intervals: np.ndarray,
-                          preprocess: bool = True,
-                          interpolation_method: str = 'cubic',
-                          outlier_threshold: float = 3.0) -> Tuple[float, float, np.ndarray, float]:
+    def _extract_rri_data(self) -> Tuple[np.ndarray, Optional[PreprocessingResult]]:
         """
-        执行Poincaré分析并计算SD1和SD2指标
+        Extract RRI data from DataBundle with proper preprocessing integration
 
-        参数:
-        rr_intervals: RR间期序列(毫秒)
-        preprocess: 是否进行预处理
-        interpolation_method: 插值方法 ('linear'或'cubic')
-        outlier_threshold: 异常值检测阈值(标准差倍数)
-
-        返回:
-        sd1: 垂直于恒等线的标准差
-        sd2: 沿着恒等线的标准差
-        cleaned_rr: 清理后的RR间期序列
-        corrected_percentage: 校正的心搏百分比
+        Returns:
+            Tuple of (rr_intervals_ms, preprocessing_result)
         """
-        corrected_percentage = 0.0
+        preprocessing_result = None
 
-        # 数据预处理
-        if preprocess:
-            rr_clean, corrected_percentage = NonlinearHRVAnalysis.preprocess_rr(
-                rr_intervals, outlier_threshold, interpolation_method
-            )
+        # Priority 1: Use existing preprocessing result if available
+        if self.bundle.preprocessing is not None:
+            rr_ms = self.bundle.preprocessing.corrected_rri
+            preprocessing_result = self.bundle.preprocessing
+
+        # Priority 2: Use raw RRI data and apply preprocessing if requested
+        elif self.bundle.rri_ms and self.use_preprocessing:
+            try:
+                preprocessing_result = preprocess_rri(
+                    self.bundle.rri_ms, **self.preprocessing_params
+                )
+                rr_ms = preprocessing_result.corrected_rri
+                # Update bundle with preprocessing results
+                self.bundle.preprocessing = preprocessing_result
+            except Exception as e:
+                warnings.warn(f"Preprocessing failed: {e}, using raw data", UserWarning)
+                rr_ms = np.array(self.bundle.rri_ms, dtype=float)
+
+        # Priority 3: Use raw RRI data without preprocessing
+        elif self.bundle.rri_ms:
+            rr_ms = np.array(self.bundle.rri_ms, dtype=float)
+
         else:
-            rr_clean = rr_intervals.copy()
+            raise ValueError("No RRI data available in DataBundle")
 
-        # 创建Poincaré图数据点
-        x = rr_clean[:-1]
-        y = rr_clean[1:]
+        # Apply analysis window if specified
+        if self.analysis_window is not None:
+            rr_ms = self._apply_analysis_window(rr_ms)
 
-        # 计算差值
+        return rr_ms, preprocessing_result
+
+    def _apply_analysis_window(self, rr_ms: np.ndarray) -> np.ndarray:
+        """Apply analysis window to RRI data"""
+        start_time, end_time = self.analysis_window
+
+        # Convert RRI to time points
+        time_points = np.cumsum(rr_ms) / 1000.0  # Convert to seconds
+        time_points = np.concatenate([[0], time_points[:-1]])
+
+        # Find indices within analysis window
+        mask = (time_points >= start_time) & (time_points <= end_time)
+
+        if not np.any(mask):
+            raise ValueError(
+                f"No data found in analysis window [{start_time}, {end_time}]"
+            )
+
+        return rr_ms[mask]
+
+    def _validate_data_quality(self) -> None:
+        """Validate data quality using preprocessing results"""
+        if self.preprocessing_result is not None:
+            quality_flags = self.preprocessing_result.quality_flags
+
+            if quality_flags and quality_flags.get("poor_signal_quality", False):
+                warnings.warn(
+                    "Poor signal quality detected. Nonlinear results may be unreliable."
+                )
+
+            if quality_flags and quality_flags.get("excessive_artifacts", False):
+                warnings.warn(
+                    "Excessive artifacts detected (>5%). Consider data quality."
+                )
+
+            artifact_percentage = self.preprocessing_result.stats.get(
+                "artifact_percentage", 0
+            )
+            if artifact_percentage > 10:
+                warnings.warn(f"High artifact percentage: {artifact_percentage:.1f}%")
+
+    def poincare_analysis(self) -> Tuple[float, float, float, Dict[str, float]]:
+        """
+        Perform PoincarÃƒÂ© analysis and calculate SD1 and SD2 metrics
+
+        Returns:
+            Tuple of (sd1, sd2, sd1_sd2_ratio, additional_metrics)
+        """
+        if len(self.rr_ms) < 2:
+            return 0.0, 0.0, 0.0, {}
+
+        # Create PoincarÃƒÂ© plot data points
+        x = self.rr_ms[:-1]  # RR(i)
+        y = self.rr_ms[1:]  # RR(i+1)
+
+        # Calculate successive differences
         diff = y - x
 
-        # 计算SD1 (正确公式)
-        sd1 = np.sqrt(np.var(diff, ddof=1) / 2)
-
-        # 计算SD2 (正确公式)
-        # SD2 = sqrt(2 * SDNN² - 0.5 * SD1²)
-        sdnn = np.std(rr_clean, ddof=1)
-        sd2 = np.sqrt(2 * sdnn ** 2 - 0.5 * sd1 ** 2)
-
-        # 添加数值稳定性检查
-        sd1 = max(sd1, 1e-10)
-        sd2 = max(sd2, 1e-10)
-
-        return sd1, sd2, rr_clean, corrected_percentage
-
-    @staticmethod
-    def sample_entropy(rr_intervals: np.ndarray,
-                       m: int = 2,
-                       r: float = 0.2,
-                       normalize: bool = True,
-                       preprocess: bool = True,
-                       interpolation_method: str = 'cubic') -> float:
-        """
-        计算RR间期序列的样本熵
-
-        参数:
-        rr_intervals: RR间期序列(毫秒)
-        m: 模板长度(通常为2)
-        r: 容差系数(通常为0.2)
-        normalize: 是否标准化数据
-        preprocess: 是否进行预处理
-        interpolation_method: 插值方法 ('linear'或'cubic')
-
-        返回:
-        sampen: 样本熵值
-        """
-        # 数据预处理
-        if preprocess:
-            rr_clean, _ = NonlinearHRVAnalysis.preprocess_rr(
-                rr_intervals, interpolation_method=interpolation_method
-            )
+        # Calculate SD1 (standard deviation perpendicular to line of identity)
+        # SD1 = sqrt(var(RR(i+1) - RR(i)) / 2)
+        if len(diff) == 1:
+            sd1 = 0.0
         else:
-            rr_clean = rr_intervals.copy()
+            sd1 = np.sqrt(np.var(diff, ddof=1) / 2)
 
-        # 输入验证
-        if len(rr_clean) < 100:
-            raise ValueError("样本熵计算至少需要100个数据点")
+        # Calculate SD2 (standard deviation along line of identity)
+        # SD2 = sqrt(2 * SDNNÃ‚Â² - 0.5 * SD1Ã‚Â²)
+        if len(self.rr_ms) == 1:
+            sd2 = 0.0
+        else:
+            sdnn = np.std(self.rr_ms, ddof=1)
+            sd2_squared = 2 * sdnn**2 - 0.5 * sd1**2
+            sd2 = np.sqrt(max(sd2_squared, 0))  # Ensure non-negative
+
+        # Calculate SD1/SD2 ratio
+        sd1_sd2_ratio = sd1 / sd2 if sd2 > 0 else float("nan")
+
+        # Additional PoincarÃƒÂ© metrics - only calculate if we have meaningful variation
+        if sd1 == 0.0 and sd2 == 0.0:
+            # For constant data, return empty additional metrics
+            additional_metrics = {}
+        else:
+            additional_metrics = {
+                "ellipse_area": np.pi * sd1 * sd2,  # Area of PoincarÃƒÂ© ellipse
+                "csi": (
+                    sd2 / sd1 if sd1 > 0 else float("inf")
+                ),  # Cardiac Sympathetic Index
+                "cvi": (
+                    np.log10(sd1 * sd2) if sd1 > 0 and sd2 > 0 else float("nan")
+                ),  # Cardiac Vagal Index
+                "modified_csi": (
+                    (sd2**2) / sd1 if sd1 > 0 else float("inf")
+                ),  # Modified CSI
+            }
+
+        return sd1, sd2, sd1_sd2_ratio, additional_metrics
+
+    def sample_entropy(
+        self, m: int = 2, r: float = 0.2, normalize: bool = True
+    ) -> float:
+        """
+        Calculate Sample Entropy of RR interval series
+
+        Args:
+            m: Template length (typically 2)
+            r: Tolerance coefficient (typically 0.2)
+            normalize: Whether to normalize data (use relative tolerance)
+
+        Returns:
+            Sample entropy value
+        """
+        if len(self.rr_ms) < 100:
+            raise ValueError(
+                "Sample entropy calculation requires at least 100 data points"
+            )
         if m < 1:
-            raise ValueError("模板长度m必须至少为1")
+            raise ValueError("Template length m must be at least 1")
         if r <= 0:
-            raise ValueError("容差r必须为正数")
+            raise ValueError("Tolerance r must be positive")
 
-        # 标准化数据
+        rr_clean = self.rr_ms.copy()
+
+        # Normalize data if requested
         if normalize:
             std = np.std(rr_clean, ddof=1)
-            if std < 1e-10:  # 防止除零错误
+            if std < 1e-10:  # Prevent division by zero
                 return 0.0
             rr_norm = (rr_clean - np.mean(rr_clean)) / std
+            tolerance = r  # r is now relative to std = 1
         else:
             rr_norm = rr_clean.copy()
+            tolerance = r * np.std(rr_clean, ddof=1)  # Absolute tolerance
 
         n = len(rr_norm)
 
-        # 样本熵的标准计算方法
+        def _maxdist(xi, xj, m):
+            """Calculate maximum distance between templates"""
+            return max([abs(ua - va) for ua, va in zip(xi, xj)])
+
         def _phi(m):
-            # 创建模板向量
-            x = np.array([rr_norm[i:i + m] for i in range(n - m)])
-            # 计算模板间的距离
-            dist = scipy.spatial.distance.cdist(x, x, metric='chebyshev')
-            # 计算匹配数（排除自匹配）
-            return np.sum(dist <= r) - n + m  # 减去自匹配
+            """Calculate phi(m) for sample entropy"""
+            patterns = np.array([rr_norm[i : i + m] for i in range(n - m + 1)])
+            C = np.zeros(n - m + 1)
 
-        # 计算样本熵
-        b = _phi(m)
-        a = _phi(m + 1)
+            for i in range(n - m + 1):
+                template = patterns[i]
+                distances = np.array(
+                    [
+                        _maxdist(template, patterns[j], m)
+                        for j in range(n - m + 1)
+                        if i != j
+                    ]
+                )
+                C[i] = np.sum(distances <= tolerance)
 
-        # 避免除零错误
-        if b == 0:
-            return 0.0
-        if a == 0:
-            return float('inf')
+            phi = np.sum(C) / ((n - m + 1) * (n - m))
+            return phi
 
-        return -np.log(a / b)
+        # Calculate sample entropy
+        phi_m = _phi(m)
+        phi_m_plus_1 = _phi(m + 1)
 
-    @staticmethod
-    def multiscale_entropy(rr_intervals: np.ndarray,
-                           scale_max: int = 10,
-                           m: int = 2,
-                           r: float = 0.15,
-                           preprocess: bool = True,
-                           interpolation_method: str = 'cubic') -> np.ndarray:
+        # Handle edge cases
+        if phi_m == 0 or phi_m_plus_1 == 0:
+            return float("inf") if phi_m == 0 else 0.0
+
+        return -np.log(phi_m_plus_1 / phi_m)
+
+    def multiscale_entropy(
+        self, scale_max: int = 10, m: int = 2, r: float = 0.15
+    ) -> np.ndarray:
         """
-        计算多尺度样本熵
+        Calculate Multiscale Sample Entropy
 
-        参数:
-        rr_intervals: RR间期序列(毫秒)
-        scale_max: 最大尺度
-        m: 模板长度
-        r: 容差系数
-        preprocess: 是否进行预处理
-        interpolation_method: 插值方法 ('linear'或'cubic')
+        Args:
+            scale_max: Maximum scale factor
+            m: Template length
+            r: Tolerance coefficient
 
-        返回:
-        mse: 各尺度的样本熵值
+        Returns:
+            Array of sample entropy values at each scale
         """
-        # 数据预处理
-        if preprocess:
-            rr_clean, _ = NonlinearHRVAnalysis.preprocess_rr(
-                rr_intervals, interpolation_method=interpolation_method
+        n = len(self.rr_ms)
+        # Fixed requirement calculation - be more conservative
+        min_required = scale_max * 50  # Ensure enough data for largest scale
+        if n < min_required:
+            raise ValueError(
+                f"Multiscale entropy requires at least {min_required} data points for scale_max={scale_max}"
             )
-        else:
-            rr_clean = rr_intervals.copy()
-
-        n = len(rr_clean)
-        if n < scale_max * 100:
-            raise ValueError(f"多尺度熵计算需要至少{scale_max * 100}个数据点")
 
         mse = np.zeros(scale_max)
+        rr_clean = self.rr_ms.copy()
 
         for scale in range(1, scale_max + 1):
-            # 创建粗粒度序列
+            # Create coarse-grained series
             coarse_grained = []
             for i in range(0, n - scale + 1, scale):
-                coarse_grained.append(np.mean(rr_clean[i:i + scale]))
+                coarse_grained.append(np.mean(rr_clean[i : i + scale]))
 
-            # 计算样本熵
+            coarse_grained = np.array(coarse_grained)
+
+            if len(coarse_grained) < 100:  # Need at least 100 for sample entropy
+                mse[scale - 1] = np.nan
+                continue
+
             try:
-                sampen = NonlinearHRVAnalysis.sample_entropy(
-                    np.array(coarse_grained), m, r, normalize=True, preprocess=False
+                # Create temporary bundle for sample entropy calculation
+                temp_bundle = DataBundle(rri_ms=coarse_grained.tolist())
+                temp_analyzer = NonlinearHRVAnalysis(
+                    temp_bundle, use_preprocessing=False
                 )
+                sampen = temp_analyzer.sample_entropy(m, r, normalize=True)
                 mse[scale - 1] = sampen
             except Exception as e:
-                print(f"尺度 {scale} 计算失败: {str(e)}")
+                warnings.warn(f"Scale {scale} calculation failed: {str(e)}")
                 mse[scale - 1] = np.nan
 
         return mse
 
-    @staticmethod
-    def detrended_fluctuation_analysis(rr_intervals: np.ndarray,
-                                       preprocess: bool = True,
-                                       interpolation_method: str = 'cubic') -> Tuple[float, float, np.ndarray]:
+    def detrended_fluctuation_analysis(
+        self,
+    ) -> Tuple[float, float, np.ndarray, np.ndarray]:
         """
-        计算去趋势波动分析(DFA)指标
+        Calculate Detrended Fluctuation Analysis (DFA) metrics
 
-        参数:
-        rr_intervals: RR间期序列(毫秒)
-        preprocess: 是否进行预处理
-        interpolation_method: 插值方法 ('linear'或'cubic')
-
-        返回:
-        alpha1: 短期标度指数(4-11点)
-        alpha2: 长期标度指数(>11点)
-        fluctuations: 各尺度的波动值
+        Returns:
+            Tuple of (alpha1, alpha2, box_sizes, fluctuations)
         """
-        # 数据预处理
-        if preprocess:
-            rr_clean, _ = NonlinearHRVAnalysis.preprocess_rr(
-                rr_intervals, interpolation_method=interpolation_method
-            )
-        else:
-            rr_clean = rr_intervals.copy()
+        if len(self.rr_ms) < 100:
+            raise ValueError("DFA calculation requires at least 100 data points")
 
+        rr_clean = self.rr_ms.copy()
         n = len(rr_clean)
-        if n < 100:
-            raise ValueError("DFA计算至少需要100个数据点")
 
-        # 累积和
+        # Step 1: Integrate the signal (cumulative sum of deviations from mean)
         y = np.cumsum(rr_clean - np.mean(rr_clean))
 
-        # 创建盒子大小 (使用对数分布)
-        min_size = 4
-        max_size = min(n // 4, 100)  # 最大盒子大小为100
-        box_sizes = np.unique(np.logspace(np.log10(min_size), np.log10(max_size), num=10, dtype=int))
+        # Step 2: Create box sizes (logarithmic scale)
+        min_box_size = 4
+        max_box_size = min(n // 4, 64)  # Limit maximum box size
+        box_sizes = np.unique(
+            np.logspace(
+                np.log10(min_box_size), np.log10(max_box_size), num=12, dtype=int
+            )
+        )
 
         fluctuations = []
 
-        for size in box_sizes:
-            # 计算分段数量
-            n_segments = n // size
-            f2 = 0
+        # Step 3: Calculate fluctuations for each box size
+        for box_size in box_sizes:
+            # Divide into non-overlapping boxes
+            n_boxes = n // box_size
 
-            for i in range(n_segments):
-                # 获取当前段
-                segment = y[i * size:(i + 1) * size]
+            if n_boxes < 1:
+                continue
 
-                # 线性拟合去趋势
-                x = np.arange(size)
-                slope, intercept = np.polyfit(x, segment, 1)
-                trend = slope * x + intercept
+            f_squared = 0
 
-                # 计算波动
+            for i in range(n_boxes):
+                # Extract segment
+                start_idx = i * box_size
+                end_idx = (i + 1) * box_size
+                segment = y[start_idx:end_idx]
+
+                # Linear detrending
+                x = np.arange(box_size)
+                coeffs = np.polyfit(x, segment, 1)
+                trend = np.polyval(coeffs, x)
+
+                # Calculate fluctuation
                 detrended = segment - trend
-                f2 += np.sum(detrended ** 2)
+                f_squared += np.sum(detrended**2)
 
-            # 平均波动
-            f2 = np.sqrt(f2 / (n_segments * size))
-            fluctuations.append(f2)
+            # Average fluctuation
+            fluctuation = np.sqrt(f_squared / (n_boxes * box_size))
+            fluctuations.append(fluctuation)
 
-        # 对数变换
-        log_box = np.log(box_sizes)
-        log_fluct = np.log(fluctuations)
+        fluctuations = np.array(fluctuations)
 
-        # 计算短期和长期标度指数
-        # 短期: 4-11点
-        short_term_mask = (box_sizes >= 4) & (box_sizes <= 11)
-        # 长期: 12-100点
-        long_term_mask = (box_sizes > 11) & (box_sizes <= 100)
+        # Step 4: Calculate scaling exponents
+        if len(fluctuations) < 4:
+            return np.nan, np.nan, box_sizes, fluctuations
 
-        # 计算标度指数
-        if np.sum(short_term_mask) > 1:
-            slope1, _ = np.polyfit(log_box[short_term_mask], log_fluct[short_term_mask], 1)
-        else:
-            slope1 = np.nan
+        log_box_sizes = np.log(box_sizes[: len(fluctuations)])
+        log_fluctuations = np.log(fluctuations)
 
-        if np.sum(long_term_mask) > 1:
-            slope2, _ = np.polyfit(log_box[long_term_mask], log_fluct[long_term_mask], 1)
-        else:
-            slope2 = np.nan
+        # Short-term scaling exponent (typically 4-11 beats)
+        short_term_mask = (box_sizes[: len(fluctuations)] >= 4) & (
+            box_sizes[: len(fluctuations)] <= 11
+        )
+        # Long-term scaling exponent (typically > 11 beats)
+        long_term_mask = box_sizes[: len(fluctuations)] > 11
 
-        return slope1, slope2, np.array(fluctuations)
+        alpha1 = np.nan
+        alpha2 = np.nan
 
-    @staticmethod
-    def recurrence_quantification_analysis(rr_intervals: np.ndarray,
-                                           threshold: float = 0.1,
-                                           embedding_dim: int = 3,
-                                           delay: int = 1,
-                                           preprocess: bool = True,
-                                           interpolation_method: str = 'cubic') -> dict:
+        if np.sum(short_term_mask) >= 2:
+            try:
+                alpha1, _ = np.polyfit(
+                    log_box_sizes[short_term_mask], log_fluctuations[short_term_mask], 1
+                )
+            except:
+                alpha1 = np.nan
+
+        if np.sum(long_term_mask) >= 2:
+            try:
+                alpha2, _ = np.polyfit(
+                    log_box_sizes[long_term_mask], log_fluctuations[long_term_mask], 1
+                )
+            except:
+                alpha2 = np.nan
+
+        return alpha1, alpha2, box_sizes[: len(fluctuations)], fluctuations
+
+    def recurrence_quantification_analysis(
+        self,
+        threshold: float = 0.1,
+        embedding_dim: int = 3,
+        delay: int = 1,
+        min_line_length: int = 2,
+    ) -> Dict[str, Union[float, int]]:  # Fixed return type annotation
         """
-        递归量化分析(RQA)
+        Recurrence Quantification Analysis (RQA)
 
-        参数:
-        rr_intervals: RR间期序列(毫秒)
-        threshold: 递归阈值
-        embedding_dim: 嵌入维度
-        delay: 延迟时间
-        preprocess: 是否进行预处理
-        interpolation_method: 插值方法 ('linear'或'cubic')
+        Args:
+            threshold: Recurrence threshold (as fraction of max distance)
+            embedding_dim: Embedding dimension
+            delay: Time delay
+            min_line_length: Minimum line length for determinism calculation
 
-        返回:
-        rqa_metrics: RQA指标字典
+        Returns:
+            Dictionary of RQA metrics
         """
-        # 数据预处理
-        if preprocess:
-            rr_clean, _ = NonlinearHRVAnalysis.preprocess_rr(
-                rr_intervals, interpolation_method=interpolation_method
-            )
-        else:
-            rr_clean = rr_intervals.copy()
+        if len(self.rr_ms) < 50:
+            raise ValueError("RQA calculation requires at least 50 data points")
 
+        rr_clean = self.rr_ms.copy()
         n = len(rr_clean)
-        if n < 100:
-            raise ValueError("RQA计算至少需要100个数据点")
 
-        # 相空间重构
-        embedded = []
-        for i in range(n - (embedding_dim - 1) * delay):
-            embedded.append(rr_clean[i:i + embedding_dim * delay:delay])
-        embedded = np.array(embedded)
+        # Phase space reconstruction
+        m = embedding_dim
+        tau = delay
+        embedded_length = n - (m - 1) * tau
 
-        # 创建递归图
+        if embedded_length < 10:
+            raise ValueError("Insufficient data for phase space reconstruction")
+
+        embedded = np.zeros((embedded_length, m))
+        for i in range(embedded_length):
+            for j in range(m):
+                embedded[i, j] = rr_clean[i + j * tau]
+
+        # Calculate distance matrix
         dist_matrix = scipy.spatial.distance_matrix(embedded, embedded)
-        recurrence_matrix = dist_matrix < threshold
 
-        # 计算RQA指标
-        n_points = recurrence_matrix.shape[0]
+        # Set recurrence threshold
+        if threshold <= 1.0:  # Relative threshold
+            max_dist = np.max(dist_matrix)
+            recurrence_threshold = threshold * max_dist
+        else:  # Absolute threshold
+            recurrence_threshold = threshold
 
-        # 递归率
-        recurrence_rate = np.sum(recurrence_matrix) / (n_points ** 2)
+        # Create recurrence matrix
+        recurrence_matrix = (dist_matrix <= recurrence_threshold).astype(int)
 
-        # 确定性 (对角线结构)
+        # Remove main diagonal (self-recurrences)
+        np.fill_diagonal(recurrence_matrix, 0)
+
+        N = recurrence_matrix.shape[0]
+        total_points = N * N
+
+        # Calculate basic RQA measures
+        total_recurrent_points = np.sum(recurrence_matrix)
+
+        # Recurrence Rate (RR)
+        recurrence_rate = (
+            total_recurrent_points / total_points if total_points > 0 else 0.0
+        )
+
+        # Find diagonal lines (determinism)
         diagonal_lines = []
-        for i in range(n_points):
-            for j in range(n_points):
-                if recurrence_matrix[i, j]:
+        visited = np.zeros_like(recurrence_matrix, dtype=bool)
+
+        for i in range(N):
+            for j in range(N):
+                if recurrence_matrix[i, j] and not visited[i, j]:
+                    # Check diagonal line starting from (i, j)
                     k = 0
-                    while (i + k < n_points and j + k < n_points and
-                           recurrence_matrix[i + k, j + k]):
+                    while (
+                        i + k < N
+                        and j + k < N
+                        and recurrence_matrix[i + k, j + k]
+                        and not visited[i + k, j + k]
+                    ):
+                        visited[i + k, j + k] = True
                         k += 1
-                    if k > 1:  # 最小线长为2
+
+                    if k >= min_line_length:
                         diagonal_lines.append(k)
-                        # 清除已计数的线
-                        for d in range(k):
-                            recurrence_matrix[i + d, j + d] = False
 
+        # Determinism (DET)
         if diagonal_lines:
-            determinism = np.sum(diagonal_lines) / np.sum(recurrence_matrix)
-            avg_diag = np.mean(diagonal_lines)
-            max_diag = np.max(diagonal_lines)
+            diagonal_points = sum(diagonal_lines)
+            determinism = (
+                diagonal_points / total_recurrent_points
+                if total_recurrent_points > 0
+                else 0.0
+            )
+            avg_diagonal_length = float(np.mean(diagonal_lines))  # Ensure float
+            max_diagonal_length = float(max(diagonal_lines))  # Ensure float
         else:
-            determinism = 0
-            avg_diag = 0
-            max_diag = 0
+            determinism = 0.0
+            avg_diagonal_length = 0.0
+            max_diagonal_length = 0.0
 
-        # 层流性 (垂直线结构)
+        # Find vertical lines (laminarity)
         vertical_lines = []
-        for j in range(n_points):
+        visited_vertical = np.zeros_like(recurrence_matrix, dtype=bool)
+
+        for j in range(N):
             i = 0
-            while i < n_points:
-                if recurrence_matrix[i, j]:
+            while i < N:
+                if recurrence_matrix[i, j] and not visited_vertical[i, j]:
                     k = 0
-                    while i + k < n_points and recurrence_matrix[i + k, j]:
+                    while (
+                        i + k < N
+                        and recurrence_matrix[i + k, j]
+                        and not visited_vertical[i + k, j]
+                    ):
+                        visited_vertical[i + k, j] = True
                         k += 1
-                    if k > 1:  # 最小线长为2
+
+                    if k >= min_line_length:
                         vertical_lines.append(k)
-                        i += k  # 跳过已计数的点
-                    else:
-                        i += 1
+                    i += k
                 else:
                     i += 1
 
+        # Laminarity (LAM)
         if vertical_lines:
-            laminarity = np.sum(vertical_lines) / np.sum(recurrence_matrix)
-            avg_vert = np.mean(vertical_lines)
-            max_vert = np.max(vertical_lines)
+            vertical_points = sum(vertical_lines)
+            laminarity = (
+                vertical_points / total_recurrent_points
+                if total_recurrent_points > 0
+                else 0.0
+            )
+            avg_vertical_length = float(np.mean(vertical_lines))  # Ensure float
+            max_vertical_length = float(max(vertical_lines))  # Ensure float
         else:
-            laminarity = 0
-            avg_vert = 0
-            max_vert = 0
+            laminarity = 0.0
+            avg_vertical_length = 0.0
+            max_vertical_length = 0.0
 
         return {
-            'recurrence_rate': recurrence_rate,
-            'determinism': determinism,
-            'avg_diagonal': avg_diag,
-            'max_diagonal': max_diag,
-            'laminarity': laminarity,
-            'avg_vertical': avg_vert,
-            'max_vertical': max_vert
+            "recurrence_rate": float(recurrence_rate),
+            "determinism": float(determinism),
+            "avg_diagonal_length": avg_diagonal_length,
+            "max_diagonal_length": max_diagonal_length,
+            "laminarity": float(laminarity),
+            "avg_vertical_length": avg_vertical_length,
+            "max_vertical_length": max_vertical_length,
+            "entropy_diagonal": float(
+                -np.sum(
+                    [
+                        p * np.log(p)
+                        for p in np.bincount(diagonal_lines) / len(diagonal_lines)
+                        if p > 0
+                    ]
+                )
+                if diagonal_lines
+                else 0.0
+            ),
+            "entropy_vertical": float(
+                -np.sum(
+                    [
+                        p * np.log(p)
+                        for p in np.bincount(vertical_lines) / len(vertical_lines)
+                        if p > 0
+                    ]
+                )
+                if vertical_lines
+                else 0.0
+            ),
         }
+
+    def full_nonlinear_analysis(
+        self,
+        include_mse: bool = True,
+        include_dfa: bool = True,
+        include_rqa: bool = True,
+        mse_scales: int = 10,
+        rqa_params: Optional[Dict] = None,
+    ) -> Dict[str, Union[float, np.ndarray, Dict, None]]:
+        """
+        Perform complete nonlinear HRV analysis
+
+        Args:
+            include_mse: Whether to calculate multiscale entropy
+            include_dfa: Whether to calculate DFA
+            include_rqa: Whether to calculate RQA
+            mse_scales: Number of scales for MSE
+            rqa_params: Parameters for RQA analysis
+
+        Returns:
+            Comprehensive nonlinear analysis results
+        """
+        results = {}
+
+        # PoincarÃƒÂ© analysis
+        try:
+            sd1, sd2, sd1_sd2_ratio, poincare_additional = self.poincare_analysis()
+            results["poincare"] = {
+                "sd1": sd1,
+                "sd2": sd2,
+                "sd1_sd2_ratio": sd1_sd2_ratio,
+                **poincare_additional,
+            }
+        except Exception as e:
+            warnings.warn(f"PoincarÃƒÂ© analysis failed: {e}")
+            results["poincare"] = None
+
+        # Sample Entropy
+        try:
+            sampen = self.sample_entropy()
+            results["sample_entropy"] = sampen
+        except Exception as e:
+            warnings.warn(f"Sample entropy calculation failed: {e}")
+            results["sample_entropy"] = None
+
+        # Multiscale Entropy
+        if include_mse:
+            try:
+                mse = self.multiscale_entropy(scale_max=mse_scales)
+                results["multiscale_entropy"] = {
+                    "values": mse,
+                    "scales": list(range(1, len(mse) + 1)),
+                    "area_under_curve": (
+                        np.trapezoid(mse[~np.isnan(mse)])
+                        if not np.all(np.isnan(mse))
+                        else 0.0
+                    ),
+                }
+            except Exception as e:
+                warnings.warn(f"Multiscale entropy calculation failed: {e}")
+                results["multiscale_entropy"] = None
+        else:
+            results["multiscale_entropy"] = None
+
+        # Detrended Fluctuation Analysis
+        if include_dfa:
+            try:
+                alpha1, alpha2, box_sizes, fluctuations = (
+                    self.detrended_fluctuation_analysis()
+                )
+                results["dfa"] = {
+                    "alpha1": alpha1,
+                    "alpha2": alpha2,
+                    "box_sizes": box_sizes,
+                    "fluctuations": fluctuations,
+                }
+            except Exception as e:
+                warnings.warn(f"DFA calculation failed: {e}")
+                results["dfa"] = None
+        else:
+            results["dfa"] = None
+
+        # Recurrence Quantification Analysis
+        if include_rqa:
+            try:
+                rqa_params = rqa_params or {}
+                rqa_metrics = self.recurrence_quantification_analysis(**rqa_params)
+                results["rqa"] = rqa_metrics
+            except Exception as e:
+                warnings.warn(f"RQA calculation failed: {e}")
+                results["rqa"] = None
+        else:
+            results["rqa"] = None
+
+        # Analysis metadata
+        results["analysis_info"] = {
+            "total_intervals": len(self.rr_ms),
+            "analysis_duration_s": np.sum(self.rr_ms) / 1000.0,
+            "preprocessing_applied": self.preprocessing_result is not None,
+            "analysis_window": self.analysis_window,
+        }
+
+        # Add preprocessing statistics if available
+        if self.preprocessing_result is not None:
+            results["preprocessing_stats"] = {
+                "artifacts_detected": self.preprocessing_result.stats[
+                    "artifacts_detected"
+                ],
+                "artifacts_corrected": self.preprocessing_result.stats[
+                    "artifacts_corrected"
+                ],
+                "artifact_percentage": self.preprocessing_result.stats[
+                    "artifact_percentage"
+                ],
+                "noise_segments": len(self.preprocessing_result.noise_segments),
+                "correction_method": self.preprocessing_result.correction_method,
+                "quality_flags": self.preprocessing_result.quality_flags,
+            }
+
+        return results
+
+
+def create_nonlinear_analysis(
+    bundle: DataBundle,
+    use_preprocessing: bool = True,
+    preprocessing_params: Optional[Dict] = None,
+    analysis_window: Optional[Tuple[float, float]] = None,
+) -> NonlinearHRVAnalysis:
+    """
+    Factory function to create nonlinear analysis from DataBundle
+
+    Args:
+        bundle: DataBundle with RRI data
+        use_preprocessing: Whether to apply preprocessing
+        preprocessing_params: Parameters for preprocessing
+        analysis_window: Time window for analysis (start_s, end_s)
+
+    Returns:
+        Configured NonlinearHRVAnalysis instance
+    """
+    return NonlinearHRVAnalysis(
+        bundle=bundle,
+        use_preprocessing=use_preprocessing,
+        preprocessing_params=preprocessing_params,
+        analysis_window=analysis_window,
+    )

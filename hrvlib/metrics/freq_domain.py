@@ -1,242 +1,588 @@
 import numpy as np
 from scipy import signal, interpolate
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, Union
 import warnings
+
+# Import from existing modules to maintain consistency
+from hrvlib.data_handler import DataBundle, TimeSeries
+from hrvlib.preprocessing import PreprocessingResult, preprocess_rri
 
 
 class HRVFreqDomainAnalysis:
     """
-    高精度HRV频域分析工具，采用Welch方法计算功率谱密度
-    实现功能：
-    1. 自适应信号预处理
-    2. 多参数Welch谱估计
-    3. 频带功率精确积分
-    4. 多频段分析（ULF, VLF, LF, HF）
-    5. 异常处理和参数验证
-
-    参数：
-    rr_intervals : RR间期序列（单位：秒）
-    sampling_rate : 重采样频率（Hz，默认4Hz）
-    detrend_method : 去趋势方法（'linear', 'constant', None）
-    window_type : 窗函数类型（默认'hann'）
-    segment_length : 分段长度（秒）
-    overlap_ratio : 分段重叠比例（0-1）
+    High-precision HRV frequency domain analysis integrated with DataBundle
+    Uses Welch method for PSD estimation with adaptive preprocessing
+    Implements standardized frequency bands and power calculations
+    Integrates with preprocessing.py instead of internal preprocessing
     """
 
-    VALID_WINDOWS = ['hann', 'hamming', 'blackman', 'bartlett', 'flattop', 'parzen', 'bohman', 'nuttall']
-    VALID_DETRENDS = ['linear', 'constant', None]
+    VALID_WINDOWS = [
+        "hann",
+        "hamming",
+        "blackman",
+        "bartlett",
+        "flattop",
+        "parzen",
+        "bohman",
+        "nuttall",
+    ]
+    VALID_DETRENDS = ["linear", "constant", None]
     DEFAULT_FREQ_BANDS = {
-        'ulf': (0.0, 0.003),
-        'vlf': (0.003, 0.04),
-        'lf': (0.04, 0.15),
-        'hf': (0.15, 0.4),
-        'lf_hf_ratio': (0.04, 0.4)
+        "ulf": (0.0, 0.003),
+        "vlf": (0.003, 0.04),
+        "lf": (0.04, 0.15),
+        "hf": (0.15, 0.4),
+        "lf_hf_ratio": (0.04, 0.4),
     }
 
-    def __init__(self,
-                 rr_intervals: np.ndarray,
-                 sampling_rate: float = 4.0,
-                 detrend_method: Optional[str] = 'linear',
-                 window_type: str = 'hann',
-                 segment_length: float = 120.0,
-                 overlap_ratio: float = 0.75):
+    def __init__(
+        self,
+        bundle: DataBundle,
+        sampling_rate: float = 4.0,
+        detrend_method: Optional[str] = "linear",
+        window_type: str = "hann",
+        segment_length: float = 120.0,
+        overlap_ratio: float = 0.75,
+        use_preprocessing: bool = True,
+        preprocessing_params: Optional[Dict] = None,
+        analysis_window: Optional[Tuple[float, float]] = None,
+    ):
+        """
+        Initialize frequency domain analyzer with DataBundle integration
 
-        self._validate_input(rr_intervals, sampling_rate, detrend_method, window_type, segment_length, overlap_ratio)
-
-        self.rr_intervals = rr_intervals
+        Args:
+            bundle: DataBundle containing RRI data and preprocessing results
+            sampling_rate: Resampling frequency in Hz (default 4 Hz)
+            detrend_method: Detrending method ('linear', 'constant', None)
+            window_type: Window function type (default 'hann')
+            segment_length: Segment length in seconds for Welch method
+            overlap_ratio: Overlap ratio for segments (0-1)
+            use_preprocessing: Whether to use/apply preprocessing
+            preprocessing_params: Parameters for preprocessing if needed
+            analysis_window: (start_time, end_time) in seconds for analysis window
+        """
+        self.bundle = bundle
         self.sampling_rate = sampling_rate
         self.detrend_method = detrend_method
         self.window_type = window_type
         self.segment_length = segment_length
         self.overlap_ratio = overlap_ratio
+        self.use_preprocessing = use_preprocessing
+        self.preprocessing_params = preprocessing_params or {}
+        self.analysis_window = analysis_window
+
+        self._validate_input()
+
+        # Extract RRI data with proper preprocessing integration
+        self.rr_intervals, self.preprocessing_result = self._extract_rri_data()
+
+        # Create time domain signal
         self.time_domain = self._create_time_domain_signal()
+
+        # Compute PSD
         self.freqs, self.psd = self._compute_welch_psd()
+
+        # Calculate spectral metrics
         self.spectral_metrics = self._compute_spectral_metrics()
 
-    def _validate_input(self,
-                        rr_intervals: np.ndarray,
-                        sampling_rate: float,
-                        detrend_method: Optional[str],
-                        window_type: str,
-                        segment_length: float,
-                        overlap_ratio: float) -> None:
-        """严格验证所有输入参数"""
-        if not isinstance(rr_intervals, np.ndarray):
-            raise TypeError("RR间期必须为NumPy数组")
-        if rr_intervals.ndim != 1:
-            raise ValueError("RR间期必须是一维数组")
-        if len(rr_intervals) == 0:
-            raise ValueError("RR间期数组不能为空")
-        if np.any(rr_intervals <= 0):
-            raise ValueError("RR间期必须为正值")
-        if sampling_rate <= 0:
-            raise ValueError("采样率必须为正数")
-        if detrend_method not in self.VALID_DETRENDS:
-            raise ValueError(f"去趋势方法必须是: {self.VALID_DETRENDS}")
-        if window_type not in self.VALID_WINDOWS:
-            raise ValueError(f"无效窗函数: {window_type}. 有效选项: {self.VALID_WINDOWS}")
-        if segment_length <= 0:
-            raise ValueError("分段长度必须为正数")
-        if not (0 <= overlap_ratio < 1):
-            raise ValueError("重叠比例必须在[0,1)范围内")
+    def _validate_input(self) -> None:
+        """Validate all input parameters"""
+        if self.sampling_rate <= 0:
+            raise ValueError("Sampling rate must be positive")
+        if self.detrend_method not in self.VALID_DETRENDS:
+            raise ValueError(f"Detrend method must be one of: {self.VALID_DETRENDS}")
+        if self.window_type not in self.VALID_WINDOWS:
+            raise ValueError(
+                f"Invalid window function: {self.window_type}. Valid options: {self.VALID_WINDOWS}"
+            )
+        if self.segment_length <= 0:
+            raise ValueError("Segment length must be positive")
+        if not (0 <= self.overlap_ratio < 1):
+            raise ValueError("Overlap ratio must be in [0,1) range")
+
+    def _extract_rri_data(self) -> Tuple[np.ndarray, Optional[PreprocessingResult]]:
+        """
+        Extract RRI data from DataBundle with proper preprocessing integration
+
+        Returns:
+            Tuple of (rr_intervals_ms, preprocessing_result)
+        """
+        preprocessing_result = None
+
+        # Priority 1: Use existing preprocessing result if available
+        if self.bundle.preprocessing is not None:
+            rr_ms = self.bundle.preprocessing.corrected_rri
+            preprocessing_result = self.bundle.preprocessing
+
+        # Priority 2: Use raw RRI data and apply preprocessing if requested
+        elif self.bundle.rri_ms and self.use_preprocessing:
+            try:
+                preprocessing_result = preprocess_rri(
+                    self.bundle.rri_ms, **self.preprocessing_params
+                )
+                rr_ms = preprocessing_result.corrected_rri
+                # Update bundle with preprocessing results
+                self.bundle.preprocessing = preprocessing_result
+            except Exception as e:
+                warnings.warn(f"Preprocessing failed: {e}, using raw data")
+                rr_ms = np.array(self.bundle.rri_ms, dtype=float)
+
+        # Priority 3: Use raw RRI data without preprocessing
+        elif self.bundle.rri_ms:
+            rr_ms = np.array(self.bundle.rri_ms, dtype=float)
+
+        else:
+            raise ValueError("No RRI data available in DataBundle")
+
+        # Apply analysis window if specified
+        if self.analysis_window is not None:
+            rr_ms = self._apply_analysis_window(rr_ms)
+
+        return rr_ms, preprocessing_result
+
+    def _apply_analysis_window(self, rr_ms: np.ndarray) -> np.ndarray:
+        """Apply analysis window to RRI data"""
+        start_time, end_time = self.analysis_window
+
+        # Convert RRI to time points
+        time_points = np.cumsum(rr_ms) / 1000.0  # Convert to seconds
+        time_points = np.concatenate([[0], time_points[:-1]])
+
+        # Find indices within analysis window
+        mask = (time_points >= start_time) & (time_points <= end_time)
+
+        if not np.any(mask):
+            raise ValueError(
+                f"No data found in analysis window [{start_time}, {end_time}]"
+            )
+
+        return rr_ms[mask]
 
     def _create_time_domain_signal(self) -> np.ndarray:
-        """创建等间隔时间序列信号（带异常值处理）"""
-        # 空数组检查
+        """Create evenly sampled time series signal with error handling"""
         if len(self.rr_intervals) == 0:
             return np.array([])
 
-        # 计算累积时间
-        time_points = np.cumsum(self.rr_intervals)
-        time_points -= time_points[0]  # 从零开始
+        # Calculate cumulative time points in seconds
+        time_points = np.cumsum(self.rr_intervals) / 1000.0
+        time_points = np.concatenate([[0], time_points[:-1]])  # Start from zero
 
-        # 使用三次样条插值进行重采样
-        interp_func = interpolate.CubicSpline(time_points, self.rr_intervals)
-
-        # 创建等间隔时间轴
+        # Check for minimum duration
         duration = time_points[-1]
+        if duration < 60:  # Less than 1 minute
+            warnings.warn(
+                "Signal duration < 1 minute. Frequency domain results may be unreliable."
+            )
+
+        # Create cubic spline interpolation
+        try:
+            interp_func = interpolate.CubicSpline(
+                time_points, self.rr_intervals, bc_type="natural"
+            )
+        except Exception as e:
+            warnings.warn(
+                f"Cubic spline interpolation failed: {e}. Using linear interpolation."
+            )
+            interp_func = interpolate.interp1d(
+                time_points,
+                self.rr_intervals,
+                kind="linear",
+                bounds_error=False,
+                fill_value="extrapolate",
+            )
+
+        # Create regular time axis
         num_samples = int(duration * self.sampling_rate)
+        if num_samples < 10:
+            warnings.warn(
+                "Very few samples for frequency analysis. Results may be unreliable."
+            )
+
         new_time_axis = np.linspace(0, duration, num_samples)
 
-        # 应用插值
-        return interp_func(new_time_axis)
+        # Apply interpolation
+        resampled_signal = interp_func(new_time_axis)
+
+        # Remove any remaining NaN values
+        if np.any(np.isnan(resampled_signal)):
+            warnings.warn("NaN values found in resampled signal. Interpolating.")
+            nan_mask = np.isnan(resampled_signal)
+            if not np.all(nan_mask):
+                resampled_signal[nan_mask] = np.interp(
+                    np.where(nan_mask)[0],
+                    np.where(~nan_mask)[0],
+                    resampled_signal[~nan_mask],
+                )
+
+        return resampled_signal
 
     def _compute_welch_psd(self) -> Tuple[np.ndarray, np.ndarray]:
-        """使用Welch方法计算功率谱密度（带自适应参数）"""
-        # 空数组检查
+        """Compute power spectral density using Welch method with adaptive parameters"""
         if len(self.time_domain) == 0:
             return np.array([]), np.array([])
 
-        # 计算分段参数
+        # Calculate segment parameters
         nperseg = int(self.segment_length * self.sampling_rate)
 
-        # 确保nperseg不超过信号长度的一半
+        # Ensure nperseg doesn't exceed half signal length
         max_nperseg = len(self.time_domain) // 2
         if nperseg > max_nperseg:
-            warnings.warn(f"请求的分段长度({nperseg})超过信号长度({len(self.time_domain)})的一半，已调整为{max_nperseg}")
+            original_nperseg = nperseg
             nperseg = max_nperseg
+            warnings.warn(
+                f"Segment length ({original_nperseg}) exceeds half signal length. "
+                f"Adjusted to {nperseg}"
+            )
 
-        # 确保nperseg至少为4
-        if nperseg < 4:
-            warnings.warn(f"计算的分段长度({nperseg})太小，无法进行Welch计算")
+        # Ensure minimum segment size
+        if nperseg < 8:
+            warnings.warn(
+                f"Segment length ({nperseg}) too small for reliable Welch computation"
+            )
             return np.array([]), np.array([])
 
         noverlap = int(nperseg * self.overlap_ratio)
 
-        # 获取窗函数
-        window = self._get_window(nperseg)
+        # Get window function
+        try:
+            window = self._get_window(nperseg)
+        except Exception as e:
+            warnings.warn(
+                f"Failed to create {self.window_type} window: {e}. Using Hann window."
+            )
+            window = signal.windows.hann(nperseg)
 
-        # 计算PSD
-        freqs, psd = signal.welch(
-            x=self.time_domain,
-            fs=self.sampling_rate,
-            window=window,
-            nperseg=nperseg,
-            noverlap=noverlap,
-            detrend=self.detrend_method,
-            scaling='density',
-            average='mean'
-        )
+        # Compute PSD with error handling
+        try:
+            freqs, psd = signal.welch(
+                x=self.time_domain,
+                fs=self.sampling_rate,
+                window=window,
+                nperseg=nperseg,
+                noverlap=noverlap,
+                detrend=self.detrend_method,
+                scaling="density",
+                average="mean",
+            )
+        except Exception as e:
+            warnings.warn(f"Welch PSD computation failed: {e}")
+            return np.array([]), np.array([])
+
+        # Validate PSD results
+        if len(psd) == 0 or np.all(psd == 0):
+            warnings.warn("PSD computation resulted in empty or zero power spectrum")
 
         return freqs, psd
 
     def _get_window(self, nperseg: int) -> np.ndarray:
-        """生成指定类型的窗函数"""
-        if self.window_type == 'hann':
-            return signal.windows.hann(nperseg)
-        elif self.window_type == 'hamming':
-            return signal.windows.hamming(nperseg)
-        elif self.window_type == 'blackman':
-            return signal.windows.blackman(nperseg)
-        elif self.window_type == 'bartlett':
-            return signal.windows.bartlett(nperseg)
-        elif self.window_type == 'flattop':
-            return signal.windows.flattop(nperseg)
-        elif self.window_type == 'parzen':
-            return signal.windows.parzen(nperseg)
-        elif self.window_type == 'bohman':
-            return signal.windows.bohman(nperseg)
-        elif self.window_type == 'nuttall':
-            return signal.windows.nuttall(nperseg)
-        else:
-            raise ValueError(f"未知窗函数类型: {self.window_type}")
+        """Generate specified window function"""
+        window_functions = {
+            "hann": signal.windows.hann,
+            "hamming": signal.windows.hamming,
+            "blackman": signal.windows.blackman,
+            "bartlett": signal.windows.bartlett,
+            "flattop": signal.windows.flattop,
+            "parzen": signal.windows.parzen,
+            "bohman": signal.windows.bohman,
+            "nuttall": signal.windows.nuttall,
+        }
+
+        window_func = window_functions.get(self.window_type)
+        if window_func is None:
+            raise ValueError(f"Unknown window function type: {self.window_type}")
+
+        return window_func(nperseg)
 
     def _compute_spectral_metrics(self) -> Dict[str, float]:
-        """计算所有频域指标（带自适应积分）"""
-        # 空PSD检查
+        """Calculate all frequency domain metrics with robust integration"""
+        # Initialize default values
+        default_results = {
+            "ulf_power": 0.0,
+            "ulf_power_nu": 0.0,
+            "vlf_power": 0.0,
+            "vlf_power_nu": 0.0,
+            "lf_power": 0.0,
+            "lf_power_nu": 0.0,
+            "hf_power": 0.0,
+            "hf_power_nu": 0.0,
+            "lf_hf_ratio": float("nan"),
+            "total_power": 0.0,
+            "peak_freq_lf": float("nan"),
+            "peak_freq_hf": float("nan"),
+            "relative_lf_power": 0.0,
+            "relative_hf_power": 0.0,
+        }
+
+        # Check for valid PSD
         if len(self.psd) == 0 or len(self.freqs) == 0:
-            warnings.warn("PSD计算结果为空，返回默认值")
-            return {
-                'ulf_power': 0.0, 'ulf_power_nu': 0.0,
-                'vlf_power': 0.0, 'vlf_power_nu': 0.0,
-                'lf_power': 0.0, 'lf_power_nu': 0.0,
-                'hf_power': 0.0, 'hf_power_nu': 0.0,
-                'lf_hf_ratio': float('nan'),
-                'total_power': 0.0,
-                'peak_freq': float('nan')
-            }
+            warnings.warn(
+                "PSD computation resulted in empty arrays. Returning default values."
+            )
+            return default_results
 
-        results = {}
+        # Calculate total power using trapezoidal integration
+        try:
+            total_power = np.trapezoid(self.psd, self.freqs)
+            if total_power <= 0:
+                warnings.warn("Total power is zero or negative. Check signal quality.")
+                return default_results
+        except Exception as e:
+            warnings.warn(f"Total power calculation failed: {e}")
+            return default_results
 
-        # 计算总功率 - 使用np.trapz替代
-        total_power = np.trapz(self.psd, self.freqs)
+        results = {"total_power": total_power}
 
-        # 计算各频段功率 - 同样使用np.trapz
+        # Calculate power in each frequency band
         for band, (low, high) in self.DEFAULT_FREQ_BANDS.items():
-            if band == 'lf_hf_ratio':
+            if band == "lf_hf_ratio":
                 continue
 
+            # Find frequency indices in band
             mask = (self.freqs >= low) & (self.freqs <= high)
+
             if not np.any(mask):
-                warnings.warn(f"频段[{low}, {high}] Hz内无数据点，功率设为0")
+                warnings.warn(f"No frequency points in {band} band [{low}, {high}] Hz")
                 band_power = 0.0
             else:
-                band_power = np.trapz(self.psd[mask], self.freqs[mask])
+                try:
+                    band_power = np.trapezoid(self.psd[mask], self.freqs[mask])
+                    band_power = max(0, band_power)  # Ensure non-negative
+                except Exception as e:
+                    warnings.warn(f"Power calculation failed for {band} band: {e}")
+                    band_power = 0.0
 
-            # 计算归一化功率（占总功率百分比）
+            # Calculate normalized power (percentage of total)
             norm_power = (band_power / total_power) * 100 if total_power > 0 else 0.0
 
-            results[f'{band}_power'] = band_power
-            results[f'{band}_power_nu'] = norm_power
+            results[f"{band}_power"] = band_power
+            results[f"{band}_power_nu"] = norm_power
 
-        # 计算LF/HF比率
-        lf_power = results.get('lf_power', 0.0)
-        hf_power = results.get('hf_power', 0.0)
+        # Calculate LF/HF ratio with robust handling
+        lf_power = results.get("lf_power", 0.0)
+        hf_power = results.get("hf_power", 0.0)
 
-        if hf_power > 0:
-            results['lf_hf_ratio'] = lf_power / hf_power
+        if hf_power > 1e-10:  # Avoid division by very small numbers
+            results["lf_hf_ratio"] = lf_power / hf_power
         else:
-            results['lf_hf_ratio'] = float('inf') if lf_power > 0 else float('nan')
+            if lf_power > 1e-10:
+                results["lf_hf_ratio"] = float("inf")
+            else:
+                results["lf_hf_ratio"] = float("nan")
 
-        # 添加总功率和峰值频率
-        results['total_power'] = total_power
-        results['peak_freq'] = self._find_peak_frequency()
+        # Calculate relative powers (LF and HF as percentage of LF+HF)
+        lf_hf_sum = lf_power + hf_power
+        if lf_hf_sum > 0:
+            results["relative_lf_power"] = (lf_power / lf_hf_sum) * 100
+            results["relative_hf_power"] = (hf_power / lf_hf_sum) * 100
+        else:
+            results["relative_lf_power"] = 0.0
+            results["relative_hf_power"] = 0.0
+
+        # Find peak frequencies in LF and HF bands
+        results["peak_freq_lf"] = self._find_peak_frequency("lf")
+        results["peak_freq_hf"] = self._find_peak_frequency("hf")
 
         return results
 
-    def _find_peak_frequency(self) -> float:
-        """在HF频段内寻找主峰频率"""
-        # 空数组检查
+    def _find_peak_frequency(self, band: str) -> float:
+        """Find peak frequency within specified band"""
         if len(self.freqs) == 0 or len(self.psd) == 0:
-            return float('nan')
+            return float("nan")
 
-        hf_mask = (self.freqs >= self.DEFAULT_FREQ_BANDS['hf'][0]) & \
-                  (self.freqs <= self.DEFAULT_FREQ_BANDS['hf'][1])
+        band_range = self.DEFAULT_FREQ_BANDS.get(band)
+        if band_range is None:
+            return float("nan")
 
-        if not np.any(hf_mask):
-            return float('nan')
+        low, high = band_range
+        mask = (self.freqs >= low) & (self.freqs <= high)
 
-        hf_psd = self.psd[hf_mask]
-        hf_freqs = self.freqs[hf_mask]
+        if not np.any(mask):
+            return float("nan")
 
-        # 寻找最高峰
-        peak_idx = np.argmax(hf_psd)
-        return hf_freqs[peak_idx]
+        band_psd = self.psd[mask]
+        band_freqs = self.freqs[mask]
 
-    def get_results(self) -> Dict[str, float]:
-        """返回所有频域指标"""
-        return self.spectral_metrics
+        if len(band_psd) == 0:
+            return float("nan")
+
+        # Find index of maximum power
+        peak_idx = np.argmax(band_psd)
+        return band_freqs[peak_idx]
+
+    def get_results(self) -> Dict[str, Union[float, Dict]]:
+        """Return comprehensive frequency domain results"""
+        results = self.spectral_metrics.copy()
+
+        # Add analysis metadata
+        results["analysis_info"] = {
+            "sampling_rate": self.sampling_rate,
+            "window_type": self.window_type,
+            "detrend_method": self.detrend_method,
+            "segment_length_s": self.segment_length,
+            "overlap_ratio": self.overlap_ratio,
+            "signal_duration_s": (
+                len(self.time_domain) / self.sampling_rate
+                if len(self.time_domain) > 0
+                else 0
+            ),
+            "frequency_resolution": (
+                self.freqs[1] - self.freqs[0] if len(self.freqs) > 1 else 0
+            ),
+            "preprocessing_applied": self.preprocessing_result is not None,
+            "analysis_window": self.analysis_window,
+        }
+
+        # Add preprocessing statistics if available
+        if self.preprocessing_result is not None:
+            results["preprocessing_stats"] = {
+                "artifacts_detected": self.preprocessing_result.stats[
+                    "artifacts_detected"
+                ],
+                "artifacts_corrected": self.preprocessing_result.stats[
+                    "artifacts_corrected"
+                ],
+                "artifact_percentage": self.preprocessing_result.stats[
+                    "artifact_percentage"
+                ],
+                "noise_segments": len(self.preprocessing_result.noise_segments),
+                "correction_method": self.preprocessing_result.correction_method,
+                "quality_flags": self.preprocessing_result.quality_flags,
+            }
+
+        return results
 
     def get_psd(self) -> Tuple[np.ndarray, np.ndarray]:
-        """返回频率和PSD数组"""
-        return self.freqs, self.psd
+        """Return frequency and PSD arrays for plotting"""
+        return self.freqs.copy(), self.psd.copy()
+
+    def get_band_powers_summary(self) -> Dict[str, Dict[str, float]]:
+        """Get organized summary of power in each frequency band"""
+        bands = ["ulf", "vlf", "lf", "hf"]
+        summary = {}
+
+        for band in bands:
+            freq_range = self.DEFAULT_FREQ_BANDS[band]
+            summary[band] = {
+                "frequency_range_hz": freq_range,
+                "absolute_power": self.spectral_metrics.get(f"{band}_power", 0.0),
+                "relative_power_pct": self.spectral_metrics.get(
+                    f"{band}_power_nu", 0.0
+                ),
+                "peak_frequency": self.spectral_metrics.get(
+                    f"peak_freq_{band}", float("nan")
+                ),
+            }
+
+        # Add LF/HF ratio
+        summary["lf_hf_ratio"] = {
+            "value": self.spectral_metrics.get("lf_hf_ratio", float("nan")),
+            "relative_lf_pct": self.spectral_metrics.get("relative_lf_power", 0.0),
+            "relative_hf_pct": self.spectral_metrics.get("relative_hf_power", 0.0),
+        }
+
+        return summary
+
+    def validate_frequency_analysis(self) -> Dict[str, Union[bool, str, float]]:
+        """Validate frequency domain analysis results and provide recommendations"""
+        validation = {
+            "is_valid": True,
+            "warnings": [],
+            "recommendations": [],
+            "signal_duration_s": (
+                len(self.time_domain) / self.sampling_rate
+                if len(self.time_domain) > 0
+                else 0
+            ),
+            "frequency_resolution_hz": (
+                self.freqs[1] - self.freqs[0] if len(self.freqs) > 1 else 0
+            ),
+        }
+
+        # Check signal duration
+        duration = validation["signal_duration_s"]
+        if duration < 120:  # Less than 2 minutes
+            validation["warnings"].append(
+                "Signal duration < 2 minutes may produce unreliable frequency metrics"
+            )
+            if duration < 60:
+                validation["is_valid"] = False
+
+        # Check frequency resolution
+        freq_res = validation["frequency_resolution_hz"]
+        if freq_res > 0.01:  # Resolution worse than 0.01 Hz
+            validation["warnings"].append(
+                f"Poor frequency resolution ({freq_res:.4f} Hz). Consider longer segments."
+            )
+
+        # Check for sufficient power
+        total_power = self.spectral_metrics.get("total_power", 0)
+        if total_power < 1e-10:
+            validation["warnings"].append("Very low total power. Check signal quality.")
+            validation["is_valid"] = False
+
+        # Check preprocessing quality
+        if self.preprocessing_result:
+            artifact_pct = self.preprocessing_result.stats.get("artifact_percentage", 0)
+            if artifact_pct > 10:
+                validation["warnings"].append(
+                    f"High artifact percentage ({artifact_pct:.1f}%) may affect frequency metrics"
+                )
+
+            if self.preprocessing_result.quality_flags:
+                if self.preprocessing_result.quality_flags.get("poor_signal_quality"):
+                    validation["warnings"].append("Poor signal quality detected")
+                    validation["is_valid"] = False
+
+        # Recommendations
+        if duration < 300:  # Less than 5 minutes
+            validation["recommendations"].append(
+                "Consider longer recordings (≥5 minutes) for stable frequency metrics"
+            )
+
+        if freq_res > 0.005:  # Resolution worse than 5 mHz
+            validation["recommendations"].append(
+                "Consider longer segment lengths for better frequency resolution"
+            )
+
+        return validation
+
+
+def create_freq_domain_analysis(
+    bundle: DataBundle,
+    sampling_rate: float = 4.0,
+    detrend_method: Optional[str] = "linear",
+    window_type: str = "hann",
+    segment_length: float = 120.0,
+    overlap_ratio: float = 0.75,
+    use_preprocessing: bool = True,
+    preprocessing_params: Optional[Dict] = None,
+    analysis_window: Optional[Tuple[float, float]] = None,
+) -> HRVFreqDomainAnalysis:
+    """
+    Factory function to create frequency domain analysis from DataBundle
+
+    Args:
+        bundle: DataBundle with RRI data
+        sampling_rate: Resampling frequency in Hz
+        detrend_method: Detrending method ('linear', 'constant', None)
+        window_type: Window function type
+        segment_length: Segment length in seconds
+        overlap_ratio: Overlap ratio for segments
+        use_preprocessing: Whether to apply preprocessing
+        preprocessing_params: Parameters for preprocessing
+        analysis_window: Time window for analysis (start_s, end_s)
+
+    Returns:
+        Configured HRVFreqDomainAnalysis instance
+    """
+    return HRVFreqDomainAnalysis(
+        bundle=bundle,
+        sampling_rate=sampling_rate,
+        detrend_method=detrend_method,
+        window_type=window_type,
+        segment_length=segment_length,
+        overlap_ratio=overlap_ratio,
+        use_preprocessing=use_preprocessing,
+        preprocessing_params=preprocessing_params,
+        analysis_window=analysis_window,
+    )
