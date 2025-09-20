@@ -1,4 +1,4 @@
-from hrvlib.ui.app import run
+from hrvlib.ui.app import main
 
 if __name__ == "__main__":
-    run()
+    main()

@@ -6,87 +6,44 @@ from typing import Tuple, Optional, List, Dict, Union
 import warnings
 
 # Import from existing modules to maintain consistency
-from hrvlib.data_handler import DataBundle, TimeSeries
-from hrvlib.preprocessing import PreprocessingResult, preprocess_rri
+from hrvlib.preprocessing import PreprocessingResult
 
 
 class NonlinearHRVAnalysis:
     """
-    Nonlinear HRV analysis toolkit integrated with DataBundle
-    Implements PoincarÃƒÂ© analysis, Sample Entropy, Multiscale Entropy, DFA and RQA
-    Uses preprocessing.py for data cleaning instead of internal preprocessing
+    Nonlinear HRV analysis toolkit
+    Implements Poincaré analysis, Sample Entropy, Multiscale Entropy, DFA and RQA
+    Expects preprocessed data from the pipeline - no internal preprocessing
     Meets research and enterprise-level accuracy requirements
     """
 
     def __init__(
         self,
-        bundle: DataBundle,
-        use_preprocessing: bool = True,
-        preprocessing_params: Optional[Dict] = None,
+        preprocessed_rri: np.ndarray,
+        preprocessing_result: Optional[PreprocessingResult] = None,
         analysis_window: Optional[Tuple[float, float]] = None,
     ):
         """
-        Initialize nonlinear HRV analyzer with DataBundle integration
+        Initialize nonlinear HRV analyzer with preprocessed data
 
         Args:
-            bundle: DataBundle containing RRI data and preprocessing results
-            use_preprocessing: Whether to use/apply preprocessing
-            preprocessing_params: Parameters for preprocessing if needed
+            preprocessed_rri: Preprocessed RR intervals in milliseconds
+            preprocessing_result: Results from preprocessing step
             analysis_window: (start_time, end_time) in seconds for analysis window
         """
-        self.bundle = bundle
-        self.use_preprocessing = use_preprocessing
+        self.rr_ms = np.array(preprocessed_rri, dtype=float)
+        self.preprocessing_result = preprocessing_result
         self.analysis_window = analysis_window
-        self.preprocessing_params = preprocessing_params or {}
-
-        # Extract RRI data with proper preprocessing integration
-        self.rr_ms, self.preprocessing_result = self._extract_rri_data()
 
         if len(self.rr_ms) < 10:
             raise ValueError("At least 10 RR intervals needed for nonlinear analysis")
 
-        # Validate data quality
-        self._validate_data_quality()
-
-    def _extract_rri_data(self) -> Tuple[np.ndarray, Optional[PreprocessingResult]]:
-        """
-        Extract RRI data from DataBundle with proper preprocessing integration
-
-        Returns:
-            Tuple of (rr_intervals_ms, preprocessing_result)
-        """
-        preprocessing_result = None
-
-        # Priority 1: Use existing preprocessing result if available
-        if self.bundle.preprocessing is not None:
-            rr_ms = self.bundle.preprocessing.corrected_rri
-            preprocessing_result = self.bundle.preprocessing
-
-        # Priority 2: Use raw RRI data and apply preprocessing if requested
-        elif self.bundle.rri_ms and self.use_preprocessing:
-            try:
-                preprocessing_result = preprocess_rri(
-                    self.bundle.rri_ms, **self.preprocessing_params
-                )
-                rr_ms = preprocessing_result.corrected_rri
-                # Update bundle with preprocessing results
-                self.bundle.preprocessing = preprocessing_result
-            except Exception as e:
-                warnings.warn(f"Preprocessing failed: {e}, using raw data", UserWarning)
-                rr_ms = np.array(self.bundle.rri_ms, dtype=float)
-
-        # Priority 3: Use raw RRI data without preprocessing
-        elif self.bundle.rri_ms:
-            rr_ms = np.array(self.bundle.rri_ms, dtype=float)
-
-        else:
-            raise ValueError("No RRI data available in DataBundle")
-
         # Apply analysis window if specified
         if self.analysis_window is not None:
-            rr_ms = self._apply_analysis_window(rr_ms)
+            self.rr_ms = self._apply_analysis_window(self.rr_ms)
 
-        return rr_ms, preprocessing_result
+        # Validate data quality
+        self._validate_data_quality()
 
     def _apply_analysis_window(self, rr_ms: np.ndarray) -> np.ndarray:
         """Apply analysis window to RRI data"""
@@ -129,7 +86,7 @@ class NonlinearHRVAnalysis:
 
     def poincare_analysis(self) -> Tuple[float, float, float, Dict[str, float]]:
         """
-        Perform PoincarÃƒÂ© analysis and calculate SD1 and SD2 metrics
+        Perform Poincaré analysis and calculate SD1 and SD2 metrics
 
         Returns:
             Tuple of (sd1, sd2, sd1_sd2_ratio, additional_metrics)
@@ -137,7 +94,7 @@ class NonlinearHRVAnalysis:
         if len(self.rr_ms) < 2:
             return 0.0, 0.0, 0.0, {}
 
-        # Create PoincarÃƒÂ© plot data points
+        # Create Poincaré plot data points
         x = self.rr_ms[:-1]  # RR(i)
         y = self.rr_ms[1:]  # RR(i+1)
 
@@ -152,7 +109,7 @@ class NonlinearHRVAnalysis:
             sd1 = np.sqrt(np.var(diff, ddof=1) / 2)
 
         # Calculate SD2 (standard deviation along line of identity)
-        # SD2 = sqrt(2 * SDNNÃ‚Â² - 0.5 * SD1Ã‚Â²)
+        # SD2 = sqrt(2 * SDNN² - 0.5 * SD1²)
         if len(self.rr_ms) == 1:
             sd2 = 0.0
         else:
@@ -163,13 +120,13 @@ class NonlinearHRVAnalysis:
         # Calculate SD1/SD2 ratio
         sd1_sd2_ratio = sd1 / sd2 if sd2 > 0 else float("nan")
 
-        # Additional PoincarÃƒÂ© metrics - only calculate if we have meaningful variation
+        # Additional Poincaré metrics - only calculate if we have meaningful variation
         if sd1 == 0.0 and sd2 == 0.0:
             # For constant data, return empty additional metrics
             additional_metrics = {}
         else:
             additional_metrics = {
-                "ellipse_area": np.pi * sd1 * sd2,  # Area of PoincarÃƒÂ© ellipse
+                "ellipse_area": np.pi * sd1 * sd2,  # Area of Poincaré ellipse
                 "csi": (
                     sd2 / sd1 if sd1 > 0 else float("inf")
                 ),  # Cardiac Sympathetic Index
@@ -292,10 +249,9 @@ class NonlinearHRVAnalysis:
                 continue
 
             try:
-                # Create temporary bundle for sample entropy calculation
-                temp_bundle = DataBundle(rri_ms=coarse_grained.tolist())
+                # Create temporary analyzer for sample entropy calculation
                 temp_analyzer = NonlinearHRVAnalysis(
-                    temp_bundle, use_preprocessing=False
+                    preprocessed_rri=coarse_grained, preprocessing_result=None
                 )
                 sampen = temp_analyzer.sample_entropy(m, r, normalize=True)
                 mse[scale - 1] = sampen
@@ -406,7 +362,7 @@ class NonlinearHRVAnalysis:
         embedding_dim: int = 3,
         delay: int = 1,
         min_line_length: int = 2,
-    ) -> Dict[str, Union[float, int]]:  # Fixed return type annotation
+    ) -> Dict[str, Union[float, int]]:
         """
         Recurrence Quantification Analysis (RQA)
 
@@ -494,8 +450,8 @@ class NonlinearHRVAnalysis:
                 if total_recurrent_points > 0
                 else 0.0
             )
-            avg_diagonal_length = float(np.mean(diagonal_lines))  # Ensure float
-            max_diagonal_length = float(max(diagonal_lines))  # Ensure float
+            avg_diagonal_length = float(np.mean(diagonal_lines))
+            max_diagonal_length = float(max(diagonal_lines))
         else:
             determinism = 0.0
             avg_diagonal_length = 0.0
@@ -532,8 +488,8 @@ class NonlinearHRVAnalysis:
                 if total_recurrent_points > 0
                 else 0.0
             )
-            avg_vertical_length = float(np.mean(vertical_lines))  # Ensure float
-            max_vertical_length = float(max(vertical_lines))  # Ensure float
+            avg_vertical_length = float(np.mean(vertical_lines))
+            max_vertical_length = float(max(vertical_lines))
         else:
             laminarity = 0.0
             avg_vertical_length = 0.0
@@ -594,7 +550,7 @@ class NonlinearHRVAnalysis:
         """
         results = {}
 
-        # PoincarÃƒÂ© analysis
+        # Poincaré analysis
         try:
             sd1, sd2, sd1_sd2_ratio, poincare_additional = self.poincare_analysis()
             results["poincare"] = {
@@ -604,7 +560,7 @@ class NonlinearHRVAnalysis:
                 **poincare_additional,
             }
         except Exception as e:
-            warnings.warn(f"PoincarÃƒÂ© analysis failed: {e}")
+            warnings.warn(f"Poincaré analysis failed: {e}")
             results["poincare"] = None
 
         # Sample Entropy
@@ -690,29 +646,3 @@ class NonlinearHRVAnalysis:
             }
 
         return results
-
-
-def create_nonlinear_analysis(
-    bundle: DataBundle,
-    use_preprocessing: bool = True,
-    preprocessing_params: Optional[Dict] = None,
-    analysis_window: Optional[Tuple[float, float]] = None,
-) -> NonlinearHRVAnalysis:
-    """
-    Factory function to create nonlinear analysis from DataBundle
-
-    Args:
-        bundle: DataBundle with RRI data
-        use_preprocessing: Whether to apply preprocessing
-        preprocessing_params: Parameters for preprocessing
-        analysis_window: Time window for analysis (start_s, end_s)
-
-    Returns:
-        Configured NonlinearHRVAnalysis instance
-    """
-    return NonlinearHRVAnalysis(
-        bundle=bundle,
-        use_preprocessing=use_preprocessing,
-        preprocessing_params=preprocessing_params,
-        analysis_window=analysis_window,
-    )

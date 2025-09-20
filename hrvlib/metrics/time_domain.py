@@ -1,89 +1,46 @@
 import numpy as np
 import warnings
 from typing import List, Tuple, Union, Optional, Dict
-from scipy.interpolate import CubicSpline
 
 # Import from existing modules to maintain consistency
-from hrvlib.data_handler import DataBundle, TimeSeries
-from hrvlib.preprocessing import PreprocessingResult, preprocess_rri
+from hrvlib.data_handler import DataBundle
+from hrvlib.preprocessing import PreprocessingResult
 
 
 class HRVTimeDomainAnalysis:
     """
     High-precision HRV time domain analysis tool integrated with DataBundle
     Implementation follows clinical and research standards (HRV Guidelines: Task Force of ESC/NASPE)
-    Uses preprocessing.py for data cleaning instead of internal preprocessing
+    Expects preprocessed data from the pipeline - no internal preprocessing
     """
 
     def __init__(
         self,
-        bundle: DataBundle,
-        use_preprocessing: bool = True,
-        preprocessing_params: Optional[Dict] = None,
+        preprocessed_rri: np.ndarray,
+        preprocessing_result: Optional[PreprocessingResult] = None,
         analysis_window: Optional[Tuple[float, float]] = None,
     ):
         """
-        Initialize HRV analyzer with DataBundle integration
+        Initialize HRV analyzer with preprocessed data
 
         Args:
-            bundle: DataBundle containing RRI data and preprocessing results
-            use_preprocessing: Whether to use/apply preprocessing
-            preprocessing_params: Parameters for preprocessing if needed
+            preprocessed_rri: Preprocessed RR intervals in milliseconds
+            preprocessing_result: Results from preprocessing step
             analysis_window: (start_time, end_time) in seconds for analysis window
         """
-        self.bundle = bundle
-        self.use_preprocessing = use_preprocessing
+        self.rr_ms = np.array(preprocessed_rri, dtype=float)
+        self.preprocessing_result = preprocessing_result
         self.analysis_window = analysis_window
-        self.preprocessing_params = preprocessing_params or {}
-
-        # Extract RRI data with proper preprocessing integration
-        self.rr_ms, self.preprocessing_result = self._extract_rri_data()
 
         if len(self.rr_ms) < 2:
             raise ValueError("At least 2 RR intervals needed for time domain analysis")
 
-        # Validate data quality
-        self._validate_data_quality()
-
-    def _extract_rri_data(self) -> Tuple[np.ndarray, Optional[PreprocessingResult]]:
-        """
-        Extract RRI data from DataBundle with proper preprocessing integration
-
-        Returns:
-            Tuple of (rr_intervals_ms, preprocessing_result)
-        """
-        preprocessing_result = None
-
-        # Priority 1: Use existing preprocessing result if available
-        if self.bundle.preprocessing is not None:
-            rr_ms = self.bundle.preprocessing.corrected_rri
-            preprocessing_result = self.bundle.preprocessing
-
-        # Priority 2: Use raw RRI data and apply preprocessing if requested
-        elif self.bundle.rri_ms and self.use_preprocessing:
-            try:
-                preprocessing_result = preprocess_rri(
-                    self.bundle.rri_ms, **self.preprocessing_params
-                )
-                rr_ms = preprocessing_result.corrected_rri
-                # Update bundle with preprocessing results
-                self.bundle.preprocessing = preprocessing_result
-            except Exception as e:
-                warnings.warn(f"Preprocessing failed: {e}, using raw data")
-                rr_ms = np.array(self.bundle.rri_ms, dtype=float)
-
-        # Priority 3: Use raw RRI data without preprocessing
-        elif self.bundle.rri_ms:
-            rr_ms = np.array(self.bundle.rri_ms, dtype=float)
-
-        else:
-            raise ValueError("No RRI data available in DataBundle")
-
         # Apply analysis window if specified
         if self.analysis_window is not None:
-            rr_ms = self._apply_analysis_window(rr_ms)
+            self.rr_ms = self._apply_analysis_window(self.rr_ms)
 
-        return rr_ms, preprocessing_result
+        # Validate data quality
+        self._validate_data_quality()
 
     def _apply_analysis_window(self, rr_ms: np.ndarray) -> np.ndarray:
         """
@@ -459,32 +416,6 @@ class HRVTimeDomainAnalysis:
                 }
 
         return comparisons
-
-
-def create_time_domain_analysis(
-    bundle: DataBundle,
-    use_preprocessing: bool = True,
-    preprocessing_params: Optional[Dict] = None,
-    analysis_window: Optional[Tuple[float, float]] = None,
-) -> HRVTimeDomainAnalysis:
-    """
-    Factory function to create time domain analysis from DataBundle
-
-    Args:
-        bundle: DataBundle with RRI data
-        use_preprocessing: Whether to apply preprocessing
-        preprocessing_params: Parameters for preprocessing
-        analysis_window: Time window for analysis (start_s, end_s)
-
-    Returns:
-        Configured HRVTimeDomainAnalysis instance
-    """
-    return HRVTimeDomainAnalysis(
-        bundle=bundle,
-        use_preprocessing=use_preprocessing,
-        preprocessing_params=preprocessing_params,
-        analysis_window=analysis_window,
-    )
 
 
 def validate_rr_intervals_for_time_domain(

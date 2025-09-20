@@ -1,88 +1,265 @@
+"""
+app.py - Main HRV Analysis Application
+Implements GUI using PyQt6 with modular widgets (widgets.py)
+Meets SRS requirements v2.1.1
+"""
+
 import sys
-import numpy as np
+from pathlib import Path
+from typing import Optional, Dict, Any
+
 from PyQt6 import QtWidgets
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from hrvlib.data_handler import load_rr_file
-from hrvlib.metrics.time_domain import HRVTimeDomainAnalysis
-from hrvlib.metrics.freq_domain import HRVFreqDomainAnalysis
+from PyQt6.QtCore import QThread
 
-# from hrvlib.metrics.nonlinear import HRVNonlinearAnalysis   # (future extension)
+from hrvlib.data_handler import load_rr_file, DataBundle
+from hrvlib.pipeline import create_unified_pipeline, HRVAnalysisResults
+from hrvlib.ui.widgets import (
+    MetaPanel,
+    ResultsPanel,
+    AnalysisParametersWidget,
+    QualityAssessmentWidget,
+    SignalViewerWidget,
+    ExportDialog,
+    HelpDialog,
+    SessionManager,
+)
+from hrvlib.ui.workers import PipelineWorker
 
 
-class HRVWindow(QtWidgets.QMainWindow):
+class HRVMainWindow(QtWidgets.QMainWindow):
+    """Main HRV Analysis Window"""
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Kubios-like HRV MVP")
-        self.fig = Figure(figsize=(6, 4))
-        self.canvas = FigureCanvas(self.fig)
-        self.text = QtWidgets.QTextEdit(readOnly=True)
+        self.setWindowTitle("HRV Analysis Software v2.1.1 - SRS Compliant")
+        self.resize(1400, 900)
 
-        w = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(w)
-        layout.addWidget(self.canvas)
-        layout.addWidget(self.text)
-        self.setCentralWidget(w)
+        # Data storage
+        self.current_bundle: Optional[DataBundle] = None
+        self.current_results: Optional[HRVAnalysisResults] = None
+        self.analysis_parameters: Dict[str, Any] = {}
+        self.edit_history: list = []
 
-        open_act = self.menuBar().addMenu("&File").addAction("Open RR File")
-        open_act.triggered.connect(self.open_file)
+        # UI setup
+        self.setup_ui()
+        self.setup_menu_bar()
+        self.statusBar().showMessage("Ready")
 
-        # TODO: Add menu options for opening TXT and EDF files.
-        # TODO: Add buttons for exporting results to CSV/PDF.
+    def setup_ui(self):
+        """Setup central layout"""
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QtWidgets.QHBoxLayout(central_widget)
+
+        # Left control panel
+        self.control_panel = QtWidgets.QWidget()
+        self.control_panel.setMinimumWidth(350)
+        self.control_panel.setMaximumWidth(400)
+        control_layout = QtWidgets.QVBoxLayout(self.control_panel)
+
+        # Metadata
+        meta_group = QtWidgets.QGroupBox("File Information")
+        meta_layout = QtWidgets.QVBoxLayout(meta_group)
+        self.meta_panel = MetaPanel()
+        meta_layout.addWidget(self.meta_panel)
+
+        # Parameters
+        params_group = QtWidgets.QGroupBox("Analysis Parameters")
+        params_layout = QtWidgets.QVBoxLayout(params_group)
+        params_scroll = QtWidgets.QScrollArea()
+        self.params_widget = AnalysisParametersWidget()
+        params_scroll.setWidget(self.params_widget)
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setMaximumHeight(350)
+        params_layout.addWidget(params_scroll)
+
+        # Quality assessment
+        self.quality_widget = QualityAssessmentWidget()
+
+        # Control buttons
+        button_group = QtWidgets.QGroupBox("Analysis Control")
+        button_layout = QtWidgets.QVBoxLayout(button_group)
+        self.analyze_btn = QtWidgets.QPushButton("🔍 Run Analysis")
+        self.analyze_btn.setEnabled(False)
+        self.export_btn = QtWidgets.QPushButton("📄 Export Results")
+        self.export_btn.setEnabled(False)
+        button_layout.addWidget(self.analyze_btn)
+        button_layout.addWidget(self.export_btn)
+
+        control_layout.addWidget(meta_group)
+        control_layout.addWidget(params_group)
+        control_layout.addWidget(self.quality_widget)
+        control_layout.addWidget(button_group)
+        control_layout.addStretch()
+
+        # Right tabbed interface
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.signal_viewer = SignalViewerWidget()
+        self.results_panel = ResultsPanel()
+        self.tab_widget.addTab(self.signal_viewer, "📊 Signal Viewer")
+        self.tab_widget.addTab(self.results_panel, "📋 Metrics Summary")
+
+        # Assemble
+        main_layout.addWidget(self.control_panel, 0)
+        main_layout.addWidget(self.tab_widget, 1)
+
+        # Connect signals
+        self.analyze_btn.clicked.connect(self.run_analysis)
+        self.export_btn.clicked.connect(self.export_results)
+
+    def setup_menu_bar(self):
+        menubar = self.menuBar()
+
+        # File
+        file_menu = menubar.addMenu("&File")
+        open_action = file_menu.addAction("Open File...")
+        open_action.triggered.connect(self.open_file)
+        save_session_action = file_menu.addAction("Save Session...")
+        save_session_action.triggered.connect(self.save_session)
+        load_session_action = file_menu.addAction("Load Session...")
+        load_session_action.triggered.connect(self.load_session)
+        file_menu.addSeparator()
+        export_action = file_menu.addAction("Export Results...")
+        export_action.triggered.connect(self.export_results)
+        file_menu.addSeparator()
+        exit_action = file_menu.addAction("Exit")
+        exit_action.triggered.connect(self.close)
+
+        # Edit
+        edit_menu = menubar.addMenu("&Edit")
+        undo_action = edit_menu.addAction("Undo Edit")
+        undo_action.triggered.connect(self.undo_edit)
+        reset_action = edit_menu.addAction("Reset All Edits")
+        reset_action.triggered.connect(self.reset_edits)
+
+        # Analysis
+        analysis_menu = menubar.addMenu("&Analysis")
+        run_action = analysis_menu.addAction("Run Analysis")
+        run_action.triggered.connect(self.run_analysis)
+
+        # View
+        view_menu = menubar.addMenu("&View")
+        toggle_control_action = view_menu.addAction("Toggle Control Panel")
+        toggle_control_action.triggered.connect(self.toggle_control_panel)
+
+        # Help
+        help_menu = menubar.addMenu("&Help")
+        help_action = help_menu.addAction("Help Manual")
+        help_action.triggered.connect(self.show_help)
 
     def open_file(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Open RR/ECG/PPG File",
-            "",
-            "All Supported (*.csv *.txt *.edf);;CSV (*.csv);;Text (*.txt);;EDF (*.edf)",
+            "Open HRV File",
+            str(Path.cwd()),
+            "HRV Data (*.csv *.txt *.edf *.hrm *.fit *.sml *.json);;All Files (*)",
         )
-        if not path:
+        if not file_path:
             return
+        try:
+            bundle = load_rr_file(file_path)
+            self.current_bundle = bundle
+            self.meta_panel.update_meta(bundle.source.__dict__)
+            self.analyze_btn.setEnabled(True)
+            self.statusBar().showMessage(f"Loaded file: {Path(file_path).name}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", str(e))
 
-        # Load using DataHandler
-        bundle = load_rr_file(path)
-        rr = bundle.rri_ms if bundle.rri_ms else bundle.ppi_ms
-
-        if not rr:
-            self.text.setPlainText("No RR/PPI intervals found in file.")
+    def run_analysis(self):
+        if not self.current_bundle:
             return
+        self.analysis_parameters = self.params_widget.get_parameters()
+        self.thread = QThread()
 
-        # ---- Time-domain analysis ----
-        td = HRVTimeDomainAnalysis(rr)
-        s_sdnn = td.sdnn()
-        s_rmssd = td.rmssd()
-        s_pnn50 = td.pnn50()
+        # Create worker with bundle and parameters
+        self.worker = PipelineWorker(self.current_bundle, self.analysis_parameters)
 
-        # ---- Frequency-domain analysis ----
-        fd = HRVFreqDomainAnalysis(rr, fs=4.0)  # 4 Hz is common default
-        vlf, lf, hf, lf_hf = fd.band_powers()
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.signals.finished.connect(self.on_analysis_finished)
+        self.worker.signals.finished.connect(self.thread.quit)
+        self.worker.signals.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
 
-        # ---- Plot RR intervals ----
-        ax = self.fig.clear() or self.fig.add_subplot(111)
-        t = np.cumsum(rr) / 1000.0
-        ax.plot(t, rr)
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("RR (ms)")
-        self.canvas.draw()
+        # Connect error signal for better error handling
+        self.worker.signals.error.connect(self.on_analysis_error)
 
-        # ---- Display results ----
-        txt = (
-            f"File: {path}\n\n"
-            f"SDNN: {s_sdnn:.2f} ms\n"
-            f"RMSSD: {s_rmssd:.2f} ms\n"
-            f"pNN50: {s_pnn50:.2f} %\n\n"
-            f"VLF: {vlf:.3f}\nLF: {lf:.3f}\nHF: {hf:.3f}\nLF/HF: {lf_hf:.3f}"
+        self.thread.start()
+        self.statusBar().showMessage("Running analysis...")
+
+    def on_analysis_error(self, error_message):
+        """Handle analysis errors"""
+        QtWidgets.QMessageBox.critical(
+            self, "Analysis Error", f"Analysis failed:\n{error_message}"
         )
-        self.text.setPlainText(txt)
+        self.statusBar().showMessage("Analysis failed")
 
-        # TODO: Display nonlinear metrics (Poincaré, Sample Entropy).
-        # TODO: Show preprocessing results before metric calculation.
+    def on_analysis_finished(self, results: HRVAnalysisResults):
+        self.current_results = results
+        self.signal_viewer.update_display(self.current_bundle, results)
+        self.results_panel.show_results(results.to_dict())
+        self.quality_widget.update_quality_assessment(results)
+        self.export_btn.setEnabled(True)
+        self.statusBar().showMessage("Analysis complete")
+
+    def export_results(self):
+        if not self.current_results:
+            return
+        dialog = ExportDialog(self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            settings = dialog.get_export_settings()
+            QtWidgets.QMessageBox.information(
+                self, "Export", f"Export settings:\n{settings}"
+            )
+
+    def save_session(self):
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Session", str(Path.cwd()), "Session Files (*.json)"
+        )
+        if file_path:
+            SessionManager.save_session(
+                file_path,
+                self.analysis_parameters,
+                self.edit_history,
+                str(self.current_bundle.source.path),
+                self.current_results,
+            )
+            self.statusBar().showMessage(f"Session saved: {file_path}")
+
+    def load_session(self):
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Session", str(Path.cwd()), "Session Files (*.json)"
+        )
+        if file_path:
+            session = SessionManager.load_session(file_path)
+            if session:
+                self.params_widget.set_parameters(
+                    session.get("analysis_parameters", {})
+                )
+                self.statusBar().showMessage(f"Session loaded: {file_path}")
+
+    def undo_edit(self):
+        QtWidgets.QMessageBox.information(self, "Undo", "Undo not yet implemented")
+
+    def reset_edits(self):
+        QtWidgets.QMessageBox.information(
+            self, "Reset", "Reset edits not yet implemented"
+        )
+
+    def toggle_control_panel(self):
+        self.control_panel.setVisible(not self.control_panel.isVisible())
+
+    def show_help(self):
+        dialog = HelpDialog(self)
+        dialog.exec()
 
 
-def run():
+def main():
     app = QtWidgets.QApplication(sys.argv)
-    win = HRVWindow()
-    win.resize(900, 700)
-    win.show()
+    window = HRVMainWindow()
+    window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

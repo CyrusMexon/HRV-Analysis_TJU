@@ -260,20 +260,25 @@ def _calculate_edr_confidence(
 
 
 def compute_rsa_coherence(
-    bundle: DataBundle, fs_target: float = 4.0
+    bundle: DataBundle,
+    preprocessed_rri: Optional[np.ndarray] = None,
+    fs_target: float = 4.0,
 ) -> Tuple[float, np.ndarray, np.ndarray, float]:
     """
     FR-22: Compute RSA coherence between HRV and respiration in 0.1-0.5 Hz band.
 
     Args:
         bundle: DataBundle with RRI data and respiratory signal
+        preprocessed_rri: Preprocessed RRI array from pipeline
         fs_target: Target sampling frequency for coherence analysis
 
     Returns:
         Tuple of (mean_coherence, freq_array, coherence_array, peak_freq)
     """
-    # Get RRI data
-    if bundle.preprocessing and bundle.preprocessing.corrected_rri is not None:
+    # Use provided preprocessed RRIs if available
+    if preprocessed_rri is not None:
+        rri_ms = preprocessed_rri
+    elif bundle.preprocessing and bundle.preprocessing.corrected_rri is not None:
         rri_ms = bundle.preprocessing.corrected_rri
     elif bundle.rri_ms:
         rri_ms = np.array(bundle.rri_ms)
@@ -416,12 +421,15 @@ def check_lf_hf_band_overlap(resp_freq_hz: float) -> Dict:
     return result
 
 
-def analyze_respiratory_metrics(bundle: DataBundle) -> Dict:
+def analyze_respiratory_metrics(
+    bundle: DataBundle, preprocessed_rri: Optional[np.ndarray] = None
+) -> Dict:
     """
     Main respiratory analysis function that integrates with existing pipeline.
 
     Args:
         bundle: DataBundle with ECG/RESP data and preprocessed RRI
+        preprocessed_rri: Optional preprocessed RRI array from pipeline
 
     Returns:
         Dictionary with complete respiratory analysis results

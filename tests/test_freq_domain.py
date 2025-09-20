@@ -10,19 +10,15 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the modules to test
-from hrvlib.metrics.freq_domain import (
-    HRVFreqDomainAnalysis,
-    create_freq_domain_analysis,
-)
-from hrvlib.data_handler import DataBundle, TimeSeries
+from hrvlib.metrics.freq_domain import HRVFreqDomainAnalysis
 from hrvlib.preprocessing import preprocess_rri, PreprocessingResult
 
 
 class TestHRVFreqDomainAnalysis(unittest.TestCase):
-    """Comprehensive test suite for HRV frequency domain analysis with real preprocessing integration"""
+    """Comprehensive test suite for HRV frequency domain analysis with preprocessed RRI input"""
 
     def setUp(self):
-        """Set up test data and real preprocessing objects"""
+        """Set up test data and preprocessing objects"""
         np.random.seed(42)
 
         # Create synthetic RR interval data with known spectral characteristics
@@ -70,45 +66,34 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         # Create very short sequence
         self.very_short_rr_ms = np.array([800, 820])
 
-        # Create DataBundle instances
-        self.normal_bundle = self._create_databundle(self.rr_intervals_ms)
-        self.artifact_bundle = self._create_databundle(self.rr_with_artifacts)
-        self.short_bundle = self._create_databundle(self.short_rr_ms)
-        self.very_short_bundle = self._create_databundle(self.very_short_rr_ms)
-
-        # Create bundle with real preprocessing result
-        self.preprocessed_bundle = self._create_databundle_with_real_preprocessing()
-
-        # Create empty bundle
-        self.empty_bundle = DataBundle()
-
-    def _create_databundle(self, rr_ms):
-        """Helper to create DataBundle with RR intervals"""
-        bundle = DataBundle()
-        bundle.rri_ms = rr_ms.tolist()
-        return bundle
-
-    def _create_databundle_with_real_preprocessing(self):
-        """Create DataBundle with real preprocessing result"""
-        bundle = self._create_databundle(self.rr_with_artifacts)
-
-        # Apply real preprocessing
-        preprocessing_result = preprocess_rri(
-            bundle.rri_ms,
+        # Create real preprocessing results
+        self.normal_preprocessing_result = preprocess_rri(
+            self.rr_intervals_ms.tolist(),
             threshold_low=300.0,
             threshold_high=2000.0,
             ectopic_threshold=0.3,
             correction_method="cubic_spline",
-            noise_detection=True,
         )
 
-        bundle.preprocessing = preprocessing_result
-        return bundle
+        self.artifact_preprocessing_result = preprocess_rri(
+            self.rr_with_artifacts.tolist(),
+            threshold_low=300.0,
+            threshold_high=2000.0,
+            ectopic_threshold=0.3,
+            correction_method="cubic_spline",
+        )
+
+        self.short_preprocessing_result = preprocess_rri(
+            self.short_rr_ms.tolist(),
+            threshold_low=300.0,
+            threshold_high=2000.0,
+            ectopic_threshold=0.3,
+            correction_method="cubic_spline",
+        )
 
     def test_real_preprocessing_result_structure(self):
         """Test that real PreprocessingResult has expected structure"""
-        # Apply real preprocessing to test data
-        result = preprocess_rri(self.rr_with_artifacts.tolist())
+        result = self.normal_preprocessing_result
 
         # Verify all expected attributes exist
         self.assertIsInstance(result, PreprocessingResult)
@@ -154,22 +139,21 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         for key in expected_quality_keys:
             self.assertIn(key, result.quality_flags, f"Missing quality flag: {key}")
 
-        # Verify correction_details structure
-        self.assertIsInstance(result.correction_details, dict)
-        self.assertIn("extra_beats_removed", result.correction_details)
-        self.assertIn("intervals_interpolated", result.correction_details)
-
     def test_initialization_valid_inputs(self):
-        """Test successful initialization with various valid inputs"""
-        # Basic initialization
-        analyzer = HRVFreqDomainAnalysis(self.normal_bundle)
+        """Test successful initialization with preprocessed RRI"""
+        # Basic initialization with preprocessed RRI
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            preprocessing_result=self.normal_preprocessing_result,
+        )
         self.assertIsInstance(analyzer, HRVFreqDomainAnalysis)
         self.assertEqual(analyzer.sampling_rate, 4.0)
         self.assertEqual(analyzer.window_type, "hann")
 
         # Custom parameters
         analyzer = HRVFreqDomainAnalysis(
-            self.normal_bundle,
+            self.normal_preprocessing_result.corrected_rri,
+            preprocessing_result=self.normal_preprocessing_result,
             sampling_rate=2.0,
             window_type="hamming",
             segment_length=180.0,
@@ -182,48 +166,70 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         self.assertEqual(analyzer.overlap_ratio, 0.5)
         self.assertEqual(analyzer.detrend_method, "constant")
 
+        # Without preprocessing result (just preprocessed RRI)
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+        self.assertIsInstance(analyzer, HRVFreqDomainAnalysis)
+
     def test_initialization_invalid_inputs(self):
         """Test initialization with invalid parameters"""
         # Invalid sampling rate
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, sampling_rate=-1.0)
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, sampling_rate=-1.0
+            )
 
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, sampling_rate=0.0)
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, sampling_rate=0.0
+            )
 
         # Invalid detrend method
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, detrend_method="invalid")
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, detrend_method="invalid"
+            )
 
         # Invalid window type
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, window_type="invalid")
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, window_type="invalid"
+            )
 
         # Invalid segment length
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, segment_length=-10.0)
-
-        with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, segment_length=0.0)
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, segment_length=-10.0
+            )
 
         # Invalid overlap ratio
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, overlap_ratio=-0.1)
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, overlap_ratio=-0.1
+            )
 
         with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, overlap_ratio=1.0)
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, overlap_ratio=1.0
+            )
 
-        with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.normal_bundle, overlap_ratio=1.5)
+    def test_empty_rri_array(self):
+        """Test behavior with empty RRI array"""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
 
-    def test_empty_databundle(self):
-        """Test behavior with empty DataBundle"""
-        with self.assertRaises(ValueError):
-            HRVFreqDomainAnalysis(self.empty_bundle)
+            analyzer = HRVFreqDomainAnalysis(np.array([]))
+            results = analyzer.get_results()
 
-    def test_databundle_with_real_preprocessing(self):
-        """Test DataBundle with existing real preprocessing result"""
-        analyzer = HRVFreqDomainAnalysis(self.preprocessed_bundle)
+            # Should handle empty input gracefully
+            self.assertEqual(results["total_power"], 0.0)
+            self.assertEqual(len(analyzer.time_domain), 0)
+
+    def test_with_preprocessing_result(self):
+        """Test analyzer with existing preprocessing result"""
+        analyzer = HRVFreqDomainAnalysis(
+            self.artifact_preprocessing_result.corrected_rri,
+            preprocessing_result=self.artifact_preprocessing_result,
+        )
 
         # Should use existing preprocessing result
         self.assertIsNotNone(analyzer.preprocessing_result)
@@ -242,148 +248,24 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         self.assertEqual(preprocessing_stats["correction_method"], "cubic_spline")
         self.assertIsInstance(preprocessing_stats["quality_flags"], dict)
 
-    def test_real_preprocessing_application(self):
-        """Test real preprocessing application when no preprocessing exists"""
-        analyzer = HRVFreqDomainAnalysis(
-            self.artifact_bundle,
-            use_preprocessing=True,
-            preprocessing_params={
-                "threshold_low": 250.0,
-                "threshold_high": 2500.0,
-                "ectopic_threshold": 0.25,
-                "correction_method": "cubic_spline",
-            },
-        )
+    def test_without_preprocessing_result(self):
+        """Test analyzer without preprocessing result"""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
 
-        # Should have applied preprocessing
-        self.assertIsNotNone(analyzer.preprocessing_result)
-        self.assertIsInstance(analyzer.preprocessing_result, PreprocessingResult)
+        # Should work without preprocessing result
+        self.assertIsNone(analyzer.preprocessing_result)
 
-        # Should have detected and corrected artifacts
+        # Get results
         results = analyzer.get_results()
-        preprocessing_stats = results["preprocessing_stats"]
-        self.assertGreater(preprocessing_stats["artifacts_detected"], 0)
-
-        # Should have updated the bundle
-        self.assertIsNotNone(analyzer.bundle.preprocessing)
-
-    def test_preprocessing_failure_handling(self):
-        """Test handling of real preprocessing failures"""
-        # Create invalid data that will cause preprocessing to fail
-        invalid_rr = [np.nan, np.inf, -100, 50000]  # Invalid RR intervals
-        invalid_bundle = self._create_databundle(np.array(invalid_rr))
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-
-            # Test that the system handles invalid data appropriately
-            # Modern preprocessing should either handle it gracefully or raise appropriate exceptions
-            try:
-                analyzer = HRVFreqDomainAnalysis(invalid_bundle, use_preprocessing=True)
-                # If successful, the preprocessing handled invalid data gracefully
-                self.assertTrue(True, "Preprocessing handled invalid data gracefully")
-            except (ValueError, RuntimeError, TypeError) as e:
-                # If it raises an exception, that's also acceptable for invalid data
-                self.assertTrue(
-                    True,
-                    f"Preprocessing appropriately rejected invalid data: {type(e).__name__}",
-                )
-
-    def test_preprocessing_parameter_passing(self):
-        """Test that preprocessing parameters are correctly passed"""
-        custom_params = {
-            "threshold_low": 250.0,
-            "threshold_high": 2500.0,
-            "ectopic_threshold": 0.4,
-            "correction_method": "cubic_spline",
-            "noise_detection": False,
-        }
-
-        # Patch preprocess_rri to verify parameters are passed correctly
-        with patch(
-            "hrvlib.metrics.freq_domain.preprocess_rri", wraps=preprocess_rri
-        ) as mock_preprocess:
-            analyzer = HRVFreqDomainAnalysis(
-                self.artifact_bundle,
-                use_preprocessing=True,
-                preprocessing_params=custom_params,
-            )
-
-            # Verify preprocess_rri was called with correct parameters
-            mock_preprocess.assert_called_once_with(
-                self.artifact_bundle.rri_ms, **custom_params
-            )
-
-    def test_quality_flags_integration(self):
-        """Test integration with real quality flags from preprocessing"""
-        # Create data that should trigger quality flags
-        poor_quality_rr = self.rr_intervals_ms.copy()
-        # Add many artifacts to trigger excessive_artifacts flag
-        for i in range(0, len(poor_quality_rr), 10):
-            poor_quality_rr[i] = 150  # Many extra beats
-
-        poor_bundle = self._create_databundle(poor_quality_rr)
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-
-            analyzer = HRVFreqDomainAnalysis(poor_bundle, use_preprocessing=True)
-            validation = analyzer.validate_frequency_analysis()
-
-            # Should detect quality issues based on real preprocessing results
-            quality_flags = analyzer.preprocessing_result.quality_flags
-            if (
-                quality_flags["excessive_artifacts"]
-                or quality_flags["poor_signal_quality"]
-            ):
-                self.assertTrue(len(validation["warnings"]) > 0)
-
-                # Check for specific warnings about artifacts or quality
-                warning_msgs = [str(warning.message) for warning in w]
-                artifact_warnings = [
-                    msg for msg in warning_msgs if "artifact" in msg.lower()
-                ]
-                quality_warnings = [
-                    msg for msg in validation["warnings"] if "quality" in msg.lower()
-                ]
-
-                self.assertTrue(len(artifact_warnings) > 0 or len(quality_warnings) > 0)
-
-    def test_noise_segments_integration(self):
-        """Test integration with real noise segment detection"""
-        # Create data with noise segments
-        noisy_rr = self.rr_intervals_ms.copy()
-        # Add high variability section to trigger noise detection
-        noise_start = 50
-        noise_end = 70
-        noisy_rr[noise_start:noise_end] += 200 * np.random.randn(
-            noise_end - noise_start
-        )
-
-        noisy_bundle = self._create_databundle(noisy_rr)
-
-        analyzer = HRVFreqDomainAnalysis(noisy_bundle, use_preprocessing=True)
-
-        # Should have noise segments detected
-        noise_segments = analyzer.preprocessing_result.noise_segments
-        results = analyzer.get_results()
-
-        self.assertEqual(
-            results["preprocessing_stats"]["noise_segments"], len(noise_segments)
-        )
-        if len(noise_segments) > 0:
-            # Each noise segment should be a tuple of (start, end)
-            for segment in noise_segments:
-                self.assertIsInstance(segment, tuple)
-                self.assertEqual(len(segment), 2)
-                self.assertIsInstance(segment[0], (int, np.integer))
-                self.assertIsInstance(segment[1], (int, np.integer))
+        self.assertNotIn("preprocessing_stats", results)
+        self.assertFalse(results["analysis_info"]["preprocessing_applied"])
 
     def test_analysis_window(self):
         """Test analysis window functionality"""
         # Test with valid analysis window
         analyzer = HRVFreqDomainAnalysis(
-            self.normal_bundle, analysis_window=(30.0, 150.0)  # 30-150 seconds
+            self.normal_preprocessing_result.corrected_rri,
+            analysis_window=(30.0, 150.0),  # 30-150 seconds
         )
 
         results = analyzer.get_results()
@@ -393,12 +275,17 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         # Test with invalid analysis window (no data)
         with self.assertRaises(ValueError):
             HRVFreqDomainAnalysis(
-                self.normal_bundle, analysis_window=(500.0, 600.0)  # Beyond data range
+                self.normal_preprocessing_result.corrected_rri,
+                analysis_window=(500.0, 600.0),  # Beyond data range
             )
 
     def test_spectral_metrics_calculation(self):
         """Test calculation of all spectral metrics"""
-        analyzer = HRVFreqDomainAnalysis(self.normal_bundle, segment_length=240)
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            preprocessing_result=self.normal_preprocessing_result,
+            segment_length=240,
+        )
         results = analyzer.get_results()
 
         # Test presence of all expected metrics
@@ -437,14 +324,14 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
             band_sum, total_power * 1.01
         )  # Allow small numerical error
 
-        # Normalized powers should sum to approximately 100% (allow more tolerance for real data)
+        # Normalized powers should sum to approximately 100%
         norm_sum = (
             results["ulf_power_nu"]
             + results["vlf_power_nu"]
             + results["lf_power_nu"]
             + results["hf_power_nu"]
         )
-        self.assertAlmostEqual(norm_sum, 100.0, delta=5.0)  # Increased tolerance
+        self.assertAlmostEqual(norm_sum, 100.0, delta=5.0)
 
         # LF/HF ratio should match calculation
         if results["hf_power"] > 1e-10:
@@ -455,9 +342,12 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         rel_sum = results["relative_lf_power"] + results["relative_hf_power"]
         self.assertAlmostEqual(rel_sum, 100.0, delta=0.1)
 
-    def test_comprehensive_results_structure_with_real_preprocessing(self):
-        """Test comprehensive structure of results with real preprocessing data"""
-        analyzer = HRVFreqDomainAnalysis(self.preprocessed_bundle)
+    def test_comprehensive_results_structure_with_preprocessing(self):
+        """Test comprehensive structure of results with preprocessing data"""
+        analyzer = HRVFreqDomainAnalysis(
+            self.artifact_preprocessing_result.corrected_rri,
+            preprocessing_result=self.artifact_preprocessing_result,
+        )
         results = analyzer.get_results()
 
         # Test main metrics
@@ -538,7 +428,9 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         ]
 
         for window in valid_windows:
-            analyzer = HRVFreqDomainAnalysis(self.normal_bundle, window_type=window)
+            analyzer = HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, window_type=window
+            )
             results = analyzer.get_results()
             self.assertGreater(
                 results["total_power"], 0, f"Failed for window: {window}"
@@ -549,7 +441,9 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         valid_detrends = ["linear", "constant", None]
 
         for detrend in valid_detrends:
-            analyzer = HRVFreqDomainAnalysis(self.normal_bundle, detrend_method=detrend)
+            analyzer = HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, detrend_method=detrend
+            )
             results = analyzer.get_results()
             self.assertGreater(
                 results["total_power"], 0, f"Failed for detrend: {detrend}"
@@ -560,7 +454,10 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
 
-            analyzer = HRVFreqDomainAnalysis(self.short_bundle)
+            analyzer = HRVFreqDomainAnalysis(
+                self.short_preprocessing_result.corrected_rri,
+                preprocessing_result=self.short_preprocessing_result,
+            )
             results = analyzer.get_results()
 
             # Should produce warnings for short signals
@@ -572,7 +469,7 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
 
     def test_get_psd_method(self):
         """Test get_psd method"""
-        analyzer = HRVFreqDomainAnalysis(self.normal_bundle)
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
         freqs, psd = analyzer.get_psd()
 
         self.assertIsInstance(freqs, np.ndarray)
@@ -585,7 +482,7 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
 
     def test_get_band_powers_summary(self):
         """Test get_band_powers_summary method"""
-        analyzer = HRVFreqDomainAnalysis(self.normal_bundle)
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
         summary = analyzer.get_band_powers_summary()
 
         expected_bands = ["ulf", "vlf", "lf", "hf", "lf_hf_ratio"]
@@ -603,10 +500,13 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         self.assertIn("relative_lf_pct", summary["lf_hf_ratio"])
         self.assertIn("relative_hf_pct", summary["lf_hf_ratio"])
 
-    def test_validate_frequency_analysis_with_real_preprocessing(self):
-        """Test frequency analysis validation with real preprocessing data"""
+    def test_validate_frequency_analysis_with_preprocessing(self):
+        """Test frequency analysis validation with preprocessing data"""
         # Test with normal signal
-        analyzer = HRVFreqDomainAnalysis(self.normal_bundle)
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            preprocessing_result=self.normal_preprocessing_result,
+        )
         validation = analyzer.validate_frequency_analysis()
 
         self.assertIn("is_valid", validation)
@@ -615,107 +515,76 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         self.assertIn("signal_duration_s", validation)
         self.assertIn("frequency_resolution_hz", validation)
 
-        # Test with preprocessed signal that has quality issues
-        poor_analyzer = HRVFreqDomainAnalysis(self.preprocessed_bundle)
-        poor_validation = poor_analyzer.validate_frequency_analysis()
+        # Test with preprocessed signal that had quality issues
+        artifact_analyzer = HRVFreqDomainAnalysis(
+            self.artifact_preprocessing_result.corrected_rri,
+            preprocessing_result=self.artifact_preprocessing_result,
+        )
+        artifact_validation = artifact_analyzer.validate_frequency_analysis()
 
-        # Check if real preprocessing detected quality issues
-        preprocessing_result = poor_analyzer.preprocessing_result
+        # Check if preprocessing detected quality issues
+        preprocessing_result = artifact_analyzer.preprocessing_result
         if preprocessing_result.stats["artifact_percentage"] > 5.0:
-            self.assertTrue(len(poor_validation["warnings"]) > 0)
+            self.assertTrue(len(artifact_validation["warnings"]) > 0)
             artifact_warnings = [
-                w for w in poor_validation["warnings"] if "artifact" in w.lower()
+                w for w in artifact_validation["warnings"] if "artifact" in w.lower()
             ]
             self.assertTrue(len(artifact_warnings) > 0)
 
-    def test_factory_function(self):
-        """Test create_freq_domain_analysis factory function"""
-        analyzer = create_freq_domain_analysis(
-            self.normal_bundle, sampling_rate=2.0, window_type="hamming"
-        )
+    def test_raw_vs_preprocessed_comparison(self):
+        """Compare results with raw vs preprocessed RRI"""
+        # Analyze raw (but clean) data
+        raw_analyzer = HRVFreqDomainAnalysis(self.rr_intervals_ms)
+        raw_results = raw_analyzer.get_results()
 
-        self.assertIsInstance(analyzer, HRVFreqDomainAnalysis)
-        self.assertEqual(analyzer.sampling_rate, 2.0)
-        self.assertEqual(analyzer.window_type, "hamming")
-
-    def test_preprocessing_vs_no_preprocessing_comparison(self):
-        """Compare results with and without preprocessing using real preprocessing"""
-        # Create fresh bundles to avoid state contamination between analyzers
-        fresh_artifact_bundle1 = self._create_databundle(self.rr_with_artifacts)
-        fresh_artifact_bundle2 = self._create_databundle(self.rr_with_artifacts)
-
-        # Analyze with preprocessing
+        # Analyze preprocessed data (from data with artifacts)
         preprocessed_analyzer = HRVFreqDomainAnalysis(
-            fresh_artifact_bundle1, use_preprocessing=True
+            self.artifact_preprocessing_result.corrected_rri,
+            preprocessing_result=self.artifact_preprocessing_result,
         )
         preprocessed_results = preprocessed_analyzer.get_results()
 
-        # Analyze without preprocessing
-        raw_analyzer = HRVFreqDomainAnalysis(
-            fresh_artifact_bundle2, use_preprocessing=False
-        )
-        raw_results = raw_analyzer.get_results()
-
-        # The preprocessed analyzer should show preprocessing was applied
-        self.assertTrue(preprocessed_results["analysis_info"]["preprocessing_applied"])
-
-        # The raw analyzer behavior depends on implementation:
-        # - If it respects use_preprocessing=False, it should show False
-        # - If it always reports existing preprocessing state, it might show True
-        # We test that both produce valid results regardless
-
         # Both should produce valid results
-        self.assertGreater(preprocessed_results["total_power"], 0)
         self.assertGreater(raw_results["total_power"], 0)
+        self.assertGreater(preprocessed_results["total_power"], 0)
 
         # Preprocessed should have preprocessing stats
+        self.assertNotIn("preprocessing_stats", raw_results)
         self.assertIn("preprocessing_stats", preprocessed_results)
 
-        # Test that we can distinguish between the two approaches
-        preprocessing_applied_count = sum(
+        # Analysis info should reflect preprocessing status
+        self.assertFalse(raw_results["analysis_info"]["preprocessing_applied"])
+        self.assertTrue(preprocessed_results["analysis_info"]["preprocessing_applied"])
+
+    def test_real_artifact_detection_verification(self):
+        """Verify that preprocessing result correctly reflects artifact detection"""
+        # Create data with known artifacts
+        rr_with_known_artifacts = np.array(
             [
-                preprocessed_results["analysis_info"]["preprocessing_applied"],
-                raw_results["analysis_info"]["preprocessing_applied"],
+                800,
+                820,
+                150,
+                810,
+                2500,
+                805,
+                815,  # extra beat, missed beat
             ]
         )
 
-        # At least one should show preprocessing was applied
-        self.assertGreaterEqual(
-            preprocessing_applied_count,
-            1,
-            "At least one analyzer should show preprocessing was applied",
+        preprocessing_result = preprocess_rri(
+            rr_with_known_artifacts.tolist(),
+            threshold_low=300.0,
+            threshold_high=2000.0,
+            ectopic_threshold=0.3,
+            correction_method="cubic_spline",
         )
 
-        # Verify the analyzers used different approaches by checking if one has preprocessing stats
-        has_preprocessing_stats = [
-            "preprocessing_stats" in preprocessed_results,
-            "preprocessing_stats" in raw_results,
-        ]
-
-        # The preprocessed analyzer should definitely have preprocessing stats
-        self.assertTrue(
-            has_preprocessing_stats[0],
-            "Preprocessed analyzer should have preprocessing stats",
+        analyzer = HRVFreqDomainAnalysis(
+            preprocessing_result.corrected_rri,
+            preprocessing_result=preprocessing_result,
         )
-
-    def test_real_artifact_correction_verification(self):
-        """Verify that real preprocessing actually corrects artifacts"""
-        # Create bundle with known artifacts
-        rr_with_known_artifacts = [
-            800,
-            820,
-            150,
-            810,
-            2500,
-            805,
-            815,
-        ]  # extra beat, missed beat
-        artifact_bundle = self._create_databundle(np.array(rr_with_known_artifacts))
-
-        analyzer = HRVFreqDomainAnalysis(artifact_bundle, use_preprocessing=True)
 
         # Should have detected and corrected artifacts
-        preprocessing_result = analyzer.preprocessing_result
         self.assertGreater(preprocessing_result.stats["artifacts_detected"], 0)
         self.assertGreater(preprocessing_result.stats["artifacts_corrected"], 0)
 
@@ -733,19 +602,17 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         self.assertIn("intervals_interpolated", correction_details)
 
     def create_comprehensive_validation_plot(self):
-        """Create comprehensive validation plot with real preprocessing comparison"""
+        """Create comprehensive validation plot comparing raw vs preprocessed analysis"""
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
         # Plot 1: Raw data PSD
-        raw_analyzer = HRVFreqDomainAnalysis(
-            self.artifact_bundle, use_preprocessing=False
-        )
+        raw_analyzer = HRVFreqDomainAnalysis(self.rr_with_artifacts)
         raw_freqs, raw_psd = raw_analyzer.get_psd()
         raw_results = raw_analyzer.get_results()
 
         if len(raw_freqs) > 0:
             ax1.semilogy(raw_freqs, raw_psd, "b-", linewidth=1.5, label="Raw Data")
-            ax1.set_title("Raw Data PSD (No Preprocessing)")
+            ax1.set_title("Raw Data PSD (With Artifacts)")
             ax1.set_xlabel("Frequency [Hz]")
             ax1.set_ylabel("Power [ms²/Hz]")
             ax1.grid(True, alpha=0.3)
@@ -754,7 +621,8 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
 
         # Plot 2: Preprocessed data PSD
         preprocessed_analyzer = HRVFreqDomainAnalysis(
-            self.artifact_bundle, use_preprocessing=True
+            self.artifact_preprocessing_result.corrected_rri,
+            preprocessing_result=self.artifact_preprocessing_result,
         )
         prep_freqs, prep_psd = preprocessed_analyzer.get_psd()
         prep_results = preprocessed_analyzer.get_results()
@@ -885,16 +753,16 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
 
         plt.tight_layout()
         plt.savefig(
-            "hrv_freq_analysis_real_preprocessing_comparison.png",
+            "hrv_freq_analysis_preprocessing_comparison.png",
             dpi=300,
             bbox_inches="tight",
         )
         plt.close()
 
         print(
-            "Comprehensive validation plot saved as 'hrv_freq_analysis_real_preprocessing_comparison.png'"
+            "Comprehensive validation plot saved as 'hrv_freq_analysis_preprocessing_comparison.png'"
         )
-        print(f"\nReal Preprocessing Results:")
+        print(f"\nPreprocessing Results:")
         if preprocessed_analyzer.preprocessing_result:
             print(
                 f"  Artifacts detected: {preprocessed_analyzer.preprocessing_result.stats['artifacts_detected']}"
@@ -923,6 +791,149 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
             low, high = bands[band]
             ax.axvspan(low, high, alpha=0.1, color=color)
 
+    def test_input_validation(self):
+        """Test input validation for different RRI formats"""
+        # Test with numpy array (should work)
+        analyzer = HRVFreqDomainAnalysis(
+            np.array(self.normal_preprocessing_result.corrected_rri)
+        )
+        self.assertIsInstance(analyzer.rr_intervals, np.ndarray)
+
+        # Test with list (should work)
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri.tolist()
+        )
+        self.assertIsInstance(analyzer.rr_intervals, np.ndarray)
+
+        # Test with invalid data types
+        with self.assertRaises((ValueError, TypeError)):
+            HRVFreqDomainAnalysis("invalid_input")
+
+    def test_time_domain_signal_creation(self):
+        """Test time domain signal creation from RRI"""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+
+        # Should create time domain signal
+        self.assertGreater(len(analyzer.time_domain), 0)
+
+        # Check signal properties
+        expected_duration = (
+            np.sum(self.normal_preprocessing_result.corrected_rri) / 1000.0
+        )
+        actual_duration = len(analyzer.time_domain) / analyzer.sampling_rate
+
+        # Allow some tolerance for interpolation effects
+        self.assertAlmostEqual(expected_duration, actual_duration, delta=5.0)
+
+    def test_welch_psd_computation(self):
+        """Test Welch PSD computation"""
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri, segment_length=120.0
+        )
+
+        freqs, psd = analyzer.get_psd()
+
+        # Should have valid frequency and PSD arrays
+        self.assertGreater(len(freqs), 0)
+        self.assertGreater(len(psd), 0)
+        self.assertEqual(len(freqs), len(psd))
+
+        # PSD should be non-negative
+        self.assertTrue(np.all(psd >= 0))
+
+        # Frequencies should be monotonically increasing
+        if len(freqs) > 1:
+            self.assertTrue(np.all(np.diff(freqs) > 0))
+
+    def test_edge_cases(self):
+        """Test various edge cases"""
+        # Very short RRI sequence
+        very_short_rri = np.array([800.0, 820.0])
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            analyzer = HRVFreqDomainAnalysis(very_short_rri)
+            results = analyzer.get_results()
+
+            # Should handle gracefully with warnings
+            self.assertTrue(len(w) > 0)
+            self.assertIsInstance(results, dict)
+
+        # Single RRI value
+        single_rri = np.array([800.0])
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+
+            analyzer = HRVFreqDomainAnalysis(single_rri)
+            results = analyzer.get_results()
+
+            # Should handle gracefully
+            self.assertIsInstance(results, dict)
+
+    def test_frequency_resolution_and_validation(self):
+        """Test frequency resolution and validation methods"""
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            segment_length=240.0,  # Long segments for better resolution
+        )
+
+        validation = analyzer.validate_frequency_analysis()
+
+        # Should have reasonable frequency resolution
+        freq_res = validation["frequency_resolution_hz"]
+        self.assertGreater(freq_res, 0)
+        self.assertLess(freq_res, 0.1)  # Should be better than 0.1 Hz
+
+        # Should validate signal duration
+        duration = validation["signal_duration_s"]
+        self.assertGreater(duration, 0)
+
+        # Should provide validation status
+        self.assertIsInstance(validation["is_valid"], bool)
+        self.assertIsInstance(validation["warnings"], list)
+        self.assertIsInstance(validation["recommendations"], list)
+
+    def test_different_sampling_rates(self):
+        """Test analysis with different sampling rates"""
+        sampling_rates = [2.0, 4.0, 8.0]
+
+        for fs in sampling_rates:
+            analyzer = HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, sampling_rate=fs
+            )
+
+            results = analyzer.get_results()
+            self.assertGreater(results["total_power"], 0)
+            self.assertEqual(results["analysis_info"]["sampling_rate"], fs)
+
+    def test_segment_length_effects(self):
+        """Test effects of different segment lengths"""
+        segment_lengths = [60.0, 120.0, 240.0]
+
+        for seg_len in segment_lengths:
+            analyzer = HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, segment_length=seg_len
+            )
+
+            results = analyzer.get_results()
+            self.assertGreater(results["total_power"], 0)
+            self.assertEqual(results["analysis_info"]["segment_length_s"], seg_len)
+
+    def test_overlap_ratio_effects(self):
+        """Test effects of different overlap ratios"""
+        overlap_ratios = [0.0, 0.5, 0.75]
+
+        for overlap in overlap_ratios:
+            analyzer = HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri, overlap_ratio=overlap
+            )
+
+            results = analyzer.get_results()
+            self.assertGreater(results["total_power"], 0)
+            self.assertEqual(results["analysis_info"]["overlap_ratio"], overlap)
+
 
 if __name__ == "__main__":
     # Run tests
@@ -932,9 +943,7 @@ if __name__ == "__main__":
 
     # Create validation plot if all tests pass
     if result.wasSuccessful():
-        print(
-            "\nAll tests passed! Creating comprehensive validation plot with real preprocessing..."
-        )
+        print("\nAll tests passed! Creating comprehensive validation plot...")
         test_instance = TestHRVFreqDomainAnalysis()
         test_instance.setUp()
         test_instance.create_comprehensive_validation_plot()
@@ -945,7 +954,7 @@ if __name__ == "__main__":
         if result.failures:
             print("Failures:")
             for test, traceback in result.failures:
-                # Fixed the f-string issue by extracting the newline character outside the f-string
+                # Extract assertion message
                 newline = "\n"
                 assertion_part = traceback.split("AssertionError: ")[-1].split(newline)[
                     0

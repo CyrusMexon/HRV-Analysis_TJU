@@ -4,8 +4,7 @@ from typing import Tuple, Dict, Optional, Union
 import warnings
 
 # Import from existing modules to maintain consistency
-from hrvlib.data_handler import DataBundle, TimeSeries
-from hrvlib.preprocessing import PreprocessingResult, preprocess_rri
+from hrvlib.preprocessing import PreprocessingResult
 
 
 class HRVFreqDomainAnalysis:
@@ -37,44 +36,39 @@ class HRVFreqDomainAnalysis:
 
     def __init__(
         self,
-        bundle: DataBundle,
+        preprocessed_rri: np.ndarray,
+        preprocessing_result: Optional[PreprocessingResult] = None,
         sampling_rate: float = 4.0,
         detrend_method: Optional[str] = "linear",
         window_type: str = "hann",
         segment_length: float = 120.0,
         overlap_ratio: float = 0.75,
-        use_preprocessing: bool = True,
-        preprocessing_params: Optional[Dict] = None,
         analysis_window: Optional[Tuple[float, float]] = None,
     ):
         """
-        Initialize frequency domain analyzer with DataBundle integration
-
-        Args:
-            bundle: DataBundle containing RRI data and preprocessing results
+        preprocessed_rri: Preprocessed RR intervals in milliseconds
+            preprocessing_result: Results from preprocessing step
             sampling_rate: Resampling frequency in Hz (default 4 Hz)
             detrend_method: Detrending method ('linear', 'constant', None)
             window_type: Window function type (default 'hann')
             segment_length: Segment length in seconds for Welch method
             overlap_ratio: Overlap ratio for segments (0-1)
-            use_preprocessing: Whether to use/apply preprocessing
-            preprocessing_params: Parameters for preprocessing if needed
             analysis_window: (start_time, end_time) in seconds for analysis window
         """
-        self.bundle = bundle
+        self.rr_intervals = np.array(preprocessed_rri, dtype=float)
+        self.preprocessing_result = preprocessing_result
         self.sampling_rate = sampling_rate
         self.detrend_method = detrend_method
         self.window_type = window_type
         self.segment_length = segment_length
         self.overlap_ratio = overlap_ratio
-        self.use_preprocessing = use_preprocessing
-        self.preprocessing_params = preprocessing_params or {}
         self.analysis_window = analysis_window
 
         self._validate_input()
 
-        # Extract RRI data with proper preprocessing integration
-        self.rr_intervals, self.preprocessing_result = self._extract_rri_data()
+        # Apply analysis window if specified
+        if self.analysis_window is not None:
+            self.rr_intervals = self._apply_analysis_window(self.rr_intervals)
 
         # Create time domain signal
         self.time_domain = self._create_time_domain_signal()
@@ -99,46 +93,6 @@ class HRVFreqDomainAnalysis:
             raise ValueError("Segment length must be positive")
         if not (0 <= self.overlap_ratio < 1):
             raise ValueError("Overlap ratio must be in [0,1) range")
-
-    def _extract_rri_data(self) -> Tuple[np.ndarray, Optional[PreprocessingResult]]:
-        """
-        Extract RRI data from DataBundle with proper preprocessing integration
-
-        Returns:
-            Tuple of (rr_intervals_ms, preprocessing_result)
-        """
-        preprocessing_result = None
-
-        # Priority 1: Use existing preprocessing result if available
-        if self.bundle.preprocessing is not None:
-            rr_ms = self.bundle.preprocessing.corrected_rri
-            preprocessing_result = self.bundle.preprocessing
-
-        # Priority 2: Use raw RRI data and apply preprocessing if requested
-        elif self.bundle.rri_ms and self.use_preprocessing:
-            try:
-                preprocessing_result = preprocess_rri(
-                    self.bundle.rri_ms, **self.preprocessing_params
-                )
-                rr_ms = preprocessing_result.corrected_rri
-                # Update bundle with preprocessing results
-                self.bundle.preprocessing = preprocessing_result
-            except Exception as e:
-                warnings.warn(f"Preprocessing failed: {e}, using raw data")
-                rr_ms = np.array(self.bundle.rri_ms, dtype=float)
-
-        # Priority 3: Use raw RRI data without preprocessing
-        elif self.bundle.rri_ms:
-            rr_ms = np.array(self.bundle.rri_ms, dtype=float)
-
-        else:
-            raise ValueError("No RRI data available in DataBundle")
-
-        # Apply analysis window if specified
-        if self.analysis_window is not None:
-            rr_ms = self._apply_analysis_window(rr_ms)
-
-        return rr_ms, preprocessing_result
 
     def _apply_analysis_window(self, rr_ms: np.ndarray) -> np.ndarray:
         """Apply analysis window to RRI data"""
@@ -545,44 +499,3 @@ class HRVFreqDomainAnalysis:
             )
 
         return validation
-
-
-def create_freq_domain_analysis(
-    bundle: DataBundle,
-    sampling_rate: float = 4.0,
-    detrend_method: Optional[str] = "linear",
-    window_type: str = "hann",
-    segment_length: float = 120.0,
-    overlap_ratio: float = 0.75,
-    use_preprocessing: bool = True,
-    preprocessing_params: Optional[Dict] = None,
-    analysis_window: Optional[Tuple[float, float]] = None,
-) -> HRVFreqDomainAnalysis:
-    """
-    Factory function to create frequency domain analysis from DataBundle
-
-    Args:
-        bundle: DataBundle with RRI data
-        sampling_rate: Resampling frequency in Hz
-        detrend_method: Detrending method ('linear', 'constant', None)
-        window_type: Window function type
-        segment_length: Segment length in seconds
-        overlap_ratio: Overlap ratio for segments
-        use_preprocessing: Whether to apply preprocessing
-        preprocessing_params: Parameters for preprocessing
-        analysis_window: Time window for analysis (start_s, end_s)
-
-    Returns:
-        Configured HRVFreqDomainAnalysis instance
-    """
-    return HRVFreqDomainAnalysis(
-        bundle=bundle,
-        sampling_rate=sampling_rate,
-        detrend_method=detrend_method,
-        window_type=window_type,
-        segment_length=segment_length,
-        overlap_ratio=overlap_ratio,
-        use_preprocessing=use_preprocessing,
-        preprocessing_params=preprocessing_params,
-        analysis_window=analysis_window,
-    )
