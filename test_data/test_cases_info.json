@@ -1,0 +1,39 @@
+{
+  "generated_on": "2025-09-19T22:45:09.703665",
+  "generator_version": "1.0",
+  "test_cases": [
+    {
+      "file": "normal_healthy_10min.csv",
+      "expected": "normal sinus rhythm, good quality"
+    },
+    {
+      "file": "normal_2pct_artifacts.csv",
+      "expected": "good quality, minimal artifacts"
+    },
+    {
+      "file": "normal_6pct_artifacts.csv",
+      "expected": "poor quality warning, high artifacts"
+    },
+    {
+      "file": "short_recording_2min.csv",
+      "expected": "duration warning, limited frequency analysis"
+    },
+    {
+      "file": "athlete_high_hrv.csv",
+      "expected": "high HRV, low heart rate"
+    },
+    {
+      "file": "low_hrv_stress.csv",
+      "expected": "low HRV metrics, elevated heart rate"
+    },
+    {
+      "file": "atrial_fibrillation.csv",
+      "expected": "irregular rhythm detection, quality warnings"
+    },
+    {
+      "file": "long_recording_60min.csv",
+      "expected": "all metrics reliable, complete analysis"
+    }
+  ],
+  "notes": "Synthetic HRV data for testing analysis software functionality"
+}
