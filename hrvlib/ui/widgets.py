@@ -41,7 +41,9 @@ class MetaPanel(QtWidgets.QFrame):
             "samples",
         ):
             lbl = QtWidgets.QLabel("-")
-            lbl.setStyleSheet("QLabel { color: #333; }")
+            lbl.setStyleSheet(
+                "QLabel { color: #ffffff; font-weight: bold; background-color: gray; padding: 2px; }"
+            )
             self.layout.addRow(key.replace("_", " ").title() + ":", lbl)
             self.labels[key] = lbl
 
@@ -97,6 +99,40 @@ class MetaPanel(QtWidgets.QFrame):
             else:
                 lbl.setText("-")
 
+    def update_meta_from_bundle(self, bundle: DataBundle):
+        """Update metadata from DataBundle with additional calculated info"""
+        meta_dict = {}
+
+        if bundle.source:
+            meta_dict.update(vars(bundle.source))
+
+        # Add calculated metadata
+        if bundle.rri_ms:
+            rri_array = np.array(bundle.rri_ms)
+            meta_dict["samples"] = len(rri_array)
+            meta_dict["duration"] = np.sum(rri_array) / 1000.0  # seconds
+
+            # Add basic stats
+            meta_dict["mean_rr"] = np.mean(rri_array)
+            meta_dict["std_rr"] = np.std(rri_array)
+
+        # Add fs from meta if available
+        if "fs" in bundle.meta:
+            meta_dict["fs"] = bundle.meta["fs"]
+        elif bundle.ecg or bundle.ppg:
+            # Get fs from first waveform if available
+            if bundle.ecg:
+                meta_dict["fs"] = bundle.ecg[0].fs
+            elif bundle.ppg:
+                meta_dict["fs"] = bundle.ppg[0].fs
+
+        # Add format info
+        meta_dict["filetype"] = bundle.meta.get(
+            "format", meta_dict.get("filetype", "unknown")
+        )
+
+        self.update_meta(meta_dict)
+
 
 class ResultsPanel(QtWidgets.QTextEdit):
     """Enhanced read-only area to show metrics & warnings with better formatting."""
@@ -120,6 +156,7 @@ class ResultsPanel(QtWidgets.QTextEdit):
                 border: 1px solid #ccc;
                 border-radius: 4px;
                 padding: 8px;
+                color: #000000; /* Text color */
             }
         """
         )
@@ -266,15 +303,23 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         )
 
         self.correction_threshold = QtWidgets.QDoubleSpinBox()
-        self.correction_threshold.setRange(0.01, 0.50)
+        self.correction_threshold.setRange(0.01, 0.10)  # 1% to 10% range per SRS
         self.correction_threshold.setValue(0.05)  # SRS: default 5%
         self.correction_threshold.setDecimals(2)
         self.correction_threshold.setSuffix("%")
         self.correction_threshold.valueChanged.connect(self.parameters_changed.emit)
 
+        # Update tooltip to match SRS FR-14
+        self.correction_threshold.setToolTip(
+            "Configurable threshold for quality warnings when % corrected beats exceeds this value (SRS FR-14). "
+            "Kubios standard artifact detection (20% ectopic threshold) is used regardless of this setting."
+        )
+
         preprocess_layout.addRow("Artifact Correction:", self.artifact_correction)
         preprocess_layout.addRow("Interpolation:", self.interpolation_method)
-        preprocess_layout.addRow("Threshold:", self.correction_threshold)
+        preprocess_layout.addRow(
+            "Quality Warning Threshold:", self.correction_threshold
+        )  # Updated label per SRS
 
         # Detrending group
         detrend_group = QtWidgets.QGroupBox("Detrending")
@@ -419,14 +464,30 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
 
     def update_quality_assessment(self, results: HRVAnalysisResults):
         """Update quality assessment display with results"""
-        if not results or not results.quality_assessment:
+        if not results:
             self._reset_display()
             return
 
-        qa = results.quality_assessment
+        # Extract quality info from preprocessing stats first
+        preprocessing_stats = results.preprocessing_stats or {}
+        quality_assessment = results.quality_assessment or {}
 
-        # Update corrected beats percentage
-        corrected_pct = qa.get("corrected_beats_percentage", 0)
+        # Get corrected beats percentage from preprocessing stats
+        corrected_pct = 0.0
+        if preprocessing_stats:
+            # Try different possible keys for artifact percentage
+            corrected_pct = (
+                preprocessing_stats.get("corrected_beats_percentage", 0)
+                or preprocessing_stats.get("artifact_percentage", 0)
+                or preprocessing_stats.get("artifacts_corrected", 0)
+            )
+
+        # Also check quality assessment
+        if quality_assessment and corrected_pct == 0:
+            corrected_pct = quality_assessment.get(
+                "corrected_beats_percentage", 0
+            ) or quality_assessment.get("artifact_percentage", 0)
+
         self.corrected_beats_label.setText(f"{corrected_pct:.1f}%")
 
         # Color code based on SRS threshold (5%)
@@ -446,18 +507,30 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
             self.status_indicator.setStyleSheet("color: green; font-weight: bold;")
 
         # Update other quality metrics
-        signal_quality = qa.get("signal_quality", "Unknown")
+        signal_quality = quality_assessment.get("signal_quality", "Unknown")
         self.signal_quality_label.setText(signal_quality)
 
-        rhythm_type = qa.get("rhythm_type", "Unknown")
+        rhythm_type = quality_assessment.get("rhythm_type", "Unknown")
         self.rhythm_type_label.setText(rhythm_type)
 
-        artifact_density = qa.get("artifact_density", 0)
+        artifact_density = quality_assessment.get("artifact_density", 0)
         self.artifact_density_label.setText(f"{artifact_density:.1f}%")
 
-        # Update warnings
+        # Update warnings from multiple sources
         self.warnings_list.clear()
-        warnings = qa.get("warnings", [])
+        warnings = []
+
+        # Get warnings from results
+        if hasattr(results, "warnings") and results.warnings:
+            warnings.extend(results.warnings)
+
+        # Get warnings from quality assessment
+        if quality_assessment.get("warnings"):
+            warnings.extend(quality_assessment["warnings"])
+
+        # Get recommendations as warnings
+        if quality_assessment.get("recommendations"):
+            warnings.extend(quality_assessment["recommendations"])
 
         # Add automatic warning for high correction percentage (SRS requirement)
         if corrected_pct > 5.0:
@@ -467,17 +540,26 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
             )
 
         for warning in warnings:
-            item = QtWidgets.QListWidgetItem(warning)
+            item = QtWidgets.QListWidgetItem(str(warning))
 
             # Color code warnings based on severity
-            if "threshold exceeded" in warning.lower() or "high" in warning.lower():
+            warning_str = str(warning).lower()
+            if (
+                "threshold exceeded" in warning_str
+                or "high" in warning_str
+                or "poor" in warning_str
+            ):
                 item.setBackground(QtGui.QColor(255, 200, 200))  # Light red
                 item.setIcon(
                     self.style().standardIcon(
                         QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical
                     )
                 )
-            elif "overlap" in warning.lower() or "respiration" in warning.lower():
+            elif (
+                "overlap" in warning_str
+                or "respiration" in warning_str
+                or "consider" in warning_str
+            ):
                 item.setBackground(QtGui.QColor(255, 255, 200))  # Light yellow
                 item.setIcon(
                     self.style().standardIcon(

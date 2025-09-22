@@ -159,7 +159,10 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         try:
             bundle = load_rr_file(file_path)
             self.current_bundle = bundle
-            self.meta_panel.update_meta(bundle.source.__dict__)
+
+            # Use the enhanced metadata update method
+            self.meta_panel.update_meta_from_bundle(bundle)
+
             self.analyze_btn.setEnabled(True)
             self.statusBar().showMessage(f"Loaded file: {Path(file_path).name}")
         except Exception as e:
@@ -176,13 +179,13 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
-        self.worker.signals.finished.connect(self.on_analysis_finished)
-        self.worker.signals.finished.connect(self.thread.quit)
-        self.worker.signals.finished.connect(self.worker.deleteLater)
+        self.worker.finished.connect(self.on_analysis_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
 
         # Connect error signal for better error handling
-        self.worker.signals.error.connect(self.on_analysis_error)
+        self.worker.error.connect(self.on_analysis_error)
 
         self.thread.start()
         self.statusBar().showMessage("Running analysis...")
@@ -195,12 +198,38 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Analysis failed")
 
     def on_analysis_finished(self, results: HRVAnalysisResults):
+        """Enhanced version with debugging information"""
         self.current_results = results
+
+        # Debug: Print what we received
+        print("=== Analysis Results Debug ===")
+        print(f"Time domain: {results.time_domain is not None}")
+        print(f"Frequency domain: {results.frequency_domain is not None}")
+        print(f"Nonlinear: {results.nonlinear is not None}")
+        print(f"Preprocessing stats: {results.preprocessing_stats}")
+        print(f"Quality assessment: {results.quality_assessment}")
+        print(f"Warnings: {results.warnings}")
+
+        # Update displays
         self.signal_viewer.update_display(self.current_bundle, results)
-        self.results_panel.show_results(results.to_dict())
-        self.quality_widget.update_quality_assessment(results)
+
+        # Debug the results dict
+        results_dict = results.to_dict()
+        print(f"Results dict keys: {list(results_dict.keys())}")
+
+        try:
+            self.results_panel.show_results(results_dict)
+        except Exception as e:
+            print(f"Results panel error: {e}")
+
+        try:
+            self.quality_widget.update_quality_assessment(results)
+        except Exception as e:
+            print(f"Quality widget error: {e}")
+
         self.export_btn.setEnabled(True)
         self.statusBar().showMessage("Analysis complete")
+        print("=== End Debug ===")
 
     def export_results(self):
         if not self.current_results:
