@@ -17,6 +17,14 @@ def plot_rr_intervals_enhanced(
     """Enhanced RR interval plot with preprocessing annotations."""
     if not bundle or not bundle.rri_ms:
         ax.set_title("No RR intervals available")
+        ax.text(
+            0.5,
+            0.5,
+            "No data to display",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
         return
 
     rri = np.array(bundle.rri_ms)
@@ -76,43 +84,248 @@ def plot_poincare_analysis(ax, bundle: DataBundle, nonlinear: dict):
 
 
 def plot_dfa_analysis(ax, nonlinear: dict):
-    """Plot DFA scaling exponents."""
-    if not nonlinear or "DFA_alpha1" not in nonlinear:
-        ax.set_title("No DFA results")
+    """FIXED: Plot DFA scaling exponents using actual DFA curve data from pipeline."""
+    ax.clear()
+
+    dfa_data = None
+    dfa_alpha1 = None
+    dfa_alpha2 = None
+    box_sizes = None
+    fluctuations = None
+
+    if nonlinear:
+        # The pipeline stores DFA data in results["nonlinear"]["dfa"]
+        if "dfa" in nonlinear and isinstance(nonlinear["dfa"], dict):
+            dfa_data = nonlinear["dfa"]
+            dfa_alpha1 = dfa_data.get("alpha1")
+            dfa_alpha2 = dfa_data.get("alpha2")
+            box_sizes = dfa_data.get("box_sizes")
+            fluctuations = dfa_data.get("fluctuations")
+
+    # If no DFA data available
+    if dfa_data is None or (dfa_alpha1 is None and dfa_alpha2 is None):
+        ax.set_title("DFA Analysis - No Data")
+        ax.text(
+            0.5,
+            0.5,
+            "DFA analysis not available\nor not computed",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=10,
+            style="italic",
+        )
+        ax.set_xlabel("Window size (beats)")
+        ax.set_ylabel("Fluctuation function")
         return
 
-    alpha1 = nonlinear.get("DFA_alpha1")
-    alpha2 = nonlinear.get("DFA_alpha2")
+    # Plot actual DFA curve if we have the raw data
+    if (
+        box_sizes is not None
+        and fluctuations is not None
+        and len(box_sizes) == len(fluctuations)
+    ):
+        # Filter out any invalid values
+        valid_mask = (
+            (box_sizes > 0)
+            & (fluctuations > 0)
+            & np.isfinite(box_sizes)
+            & np.isfinite(fluctuations)
+        )
 
-    scales = np.arange(1, 10)
-    f1 = alpha1 * np.log(scales)
-    f2 = alpha2 * np.log(scales)
+        if np.any(valid_mask):
+            valid_boxes = box_sizes[valid_mask]
+            valid_flucts = fluctuations[valid_mask]
 
-    ax.plot(scales, f1, "g-", lw=1.5, label=f"α1={alpha1:.2f}")
-    ax.plot(scales, f2, "r-", lw=1.5, label=f"α2={alpha2:.2f}")
+            ax.loglog(
+                valid_boxes,
+                valid_flucts,
+                "bo-",
+                markersize=4,
+                linewidth=1,
+                label="DFA curve",
+                alpha=0.7,
+            )
 
-    ax.set_xscale("log")
-    ax.set_xlabel("Window size (log)")
-    ax.set_ylabel("Fluctuation function (log)")
-    ax.set_title("DFA Scaling")
+            # Add trend lines for alpha1 and alpha2 if available
+            if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
+                # Short-term scaling (typically 4-11 beats)
+                short_mask = (valid_boxes >= 4) & (valid_boxes <= 11)
+                if np.any(short_mask):
+                    short_boxes = valid_boxes[short_mask]
+                    if len(short_boxes) > 0:
+                        # Create trend line
+                        trend_boxes = np.linspace(
+                            short_boxes.min(), short_boxes.max(), 20
+                        )
+                        trend_flucts = trend_boxes**dfa_alpha1 * np.exp(
+                            np.log(valid_flucts[short_mask][0])
+                            - dfa_alpha1 * np.log(short_boxes[0])
+                        )
+                        ax.loglog(
+                            trend_boxes,
+                            trend_flucts,
+                            "g-",
+                            linewidth=2,
+                            label=f"α₁={dfa_alpha1:.3f}",
+                        )
+
+            if dfa_alpha2 is not None and not np.isnan(dfa_alpha2):
+                # Long-term scaling (>11 beats)
+                long_mask = valid_boxes > 11
+                if np.any(long_mask):
+                    long_boxes = valid_boxes[long_mask]
+                    if len(long_boxes) > 0:
+                        # Create trend line
+                        trend_boxes = np.linspace(
+                            long_boxes.min(), long_boxes.max(), 20
+                        )
+                        trend_flucts = trend_boxes**dfa_alpha2 * np.exp(
+                            np.log(valid_flucts[long_mask][0])
+                            - dfa_alpha2 * np.log(long_boxes[0])
+                        )
+                        ax.loglog(
+                            trend_boxes,
+                            trend_flucts,
+                            "r-",
+                            linewidth=2,
+                            label=f"α₂={dfa_alpha2:.3f}",
+                        )
+        else:
+            # Fallback to synthetic curves if data is invalid
+            scales = np.logspace(0.6, 1.8, 20)  # 4 to 64 beats
+            if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
+                f1 = scales**dfa_alpha1
+                ax.loglog(scales, f1, "g-", lw=2, label=f"α₁={dfa_alpha1:.3f}")
+            if dfa_alpha2 is not None and not np.isnan(dfa_alpha2):
+                f2 = scales**dfa_alpha2 * 2
+                ax.loglog(scales, f2, "r-", lw=2, label=f"α₂={dfa_alpha2:.3f}")
+    else:
+        # Fallback to synthetic curves if no raw data available
+        scales = np.logspace(0.6, 1.8, 20)  # 4 to 64 beats
+        if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
+            f1 = scales**dfa_alpha1
+            ax.loglog(scales, f1, "g-", lw=2, label=f"α₁={dfa_alpha1:.3f}")
+        if dfa_alpha2 is not None and not np.isnan(dfa_alpha2):
+            f2 = scales**dfa_alpha2 * 2
+            ax.loglog(scales, f2, "r-", lw=2, label=f"α₂={dfa_alpha2:.3f}")
+
+    ax.set_xlabel("Window size (beats)")
+    ax.set_ylabel("Fluctuation function")
+    ax.set_title("Detrended Fluctuation Analysis")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
+    # Add interpretation text
+    interpretation = ""
+    if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
+        if dfa_alpha1 < 0.5:
+            interpretation += "α₁<0.5: Anti-correlated\n"
+        elif dfa_alpha1 > 1.5:
+            interpretation += "α₁>1.5: Non-stationary\n"
+        else:
+            interpretation += "α₁≈1.0: Pink noise (healthy)\n"
+
+    if interpretation:
+        ax.text(
+            0.98,
+            0.02,
+            interpretation.strip(),
+            transform=ax.transAxes,
+            fontsize=8,
+            ha="right",
+            va="bottom",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
+        )
+
 
 def plot_quality_assessment(ax, quality: dict, preprocessing_stats: dict):
-    """Visualize quality metrics as bar chart / indicators."""
-    if not quality:
-        ax.set_title("No quality assessment available")
+    """FIXED: Visualize quality metrics with better data handling."""
+    ax.clear()
+
+    # Collect quality metrics from both sources
+    metrics_data = {}
+
+    # Get data from preprocessing_stats
+    if preprocessing_stats:
+        corrected_pct = (
+            preprocessing_stats.get("corrected_beats_percentage", 0)
+            or preprocessing_stats.get("artifact_percentage", 0)
+            or preprocessing_stats.get("artifacts_corrected", 0)
+        )
+        if corrected_pct > 0:
+            metrics_data["Corrected\nBeats (%)"] = corrected_pct
+
+    # Get data from quality assessment
+    if quality:
+        artifact_pct = quality.get("artifact_percentage", 0)
+        if artifact_pct > 0:
+            metrics_data["Artifacts (%)"] = artifact_pct
+
+        duration = quality.get("duration_s")
+        if duration:
+            metrics_data["Duration (min)"] = duration / 60.0
+
+    # If no meaningful data, show placeholder
+    if not metrics_data or all(v == 0 for v in metrics_data.values()):
+        ax.set_title("Quality Assessment")
+        ax.text(
+            0.5,
+            0.5,
+            "Quality metrics\nnot available",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=10,
+            style="italic",
+        )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
         return
 
-    metrics = ["corrected_beats_percentage", "artifact_density"]
-    values = [quality.get(m, 0) for m in metrics]
+    # Create bar chart
+    labels = list(metrics_data.keys())
+    values = list(metrics_data.values())
 
-    ax.bar(metrics, values, color=["orange", "red"], alpha=0.7)
-    ax.set_ylabel("%")
-    ax.set_ylim(0, 100)
+    # Color code bars based on values
+    colors = []
+    for label, value in zip(labels, values):
+        if "Corrected" in label or "Artifact" in label:
+            if value > 5:
+                colors.append("red")
+            elif value > 2:
+                colors.append("orange")
+            else:
+                colors.append("green")
+        else:
+            colors.append("blue")
+
+    bars = ax.bar(labels, values, color=colors, alpha=0.7)
+
+    # Add value labels on bars
+    for bar, value in zip(bars, values):
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height + max(values) * 0.01,
+            f"{value:.1f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
     ax.set_title("Quality Assessment")
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # Set appropriate y-axis limits
+    if any("%" in label for label in labels):
+        ax.set_ylim(0, max(100, max(values) * 1.2))
+    else:
+        ax.set_ylim(0, max(values) * 1.2)
+
+    # Rotate x-labels if needed
+    if len(labels) > 2:
+        ax.tick_params(axis="x", rotation=45)
 
 
 def create_summary_figure(
@@ -182,10 +395,9 @@ def create_summary_figure(
 
     # Quality assessment
     ax7 = fig.add_subplot(gs[2, 2])
-    if results.quality_assessment:
-        plot_quality_assessment(
-            ax7, results.quality_assessment, results.preprocessing_stats
-        )
+    plot_quality_assessment(
+        ax7, results.quality_assessment, results.preprocessing_stats
+    )
 
     # Bottom row: Metrics summary table
     ax8 = fig.add_subplot(gs[3, :])
@@ -232,7 +444,7 @@ def create_summary_figure(
 def plot_pipeline_results(
     fig: plt.Figure, bundle: DataBundle, results: HRVAnalysisResults
 ):
-    """Plot pipeline results into the provided Matplotlib figure for the GUI signal viewer."""
+    """FIXED: Plot pipeline results with better error handling and data validation."""
 
     fig.clear()
     gs = GridSpec(2, 2, figure=fig)
@@ -246,21 +458,54 @@ def plot_pipeline_results(
     # 2. Frequency domain (PSD)
     ax2 = fig.add_subplot(gs[0, 1])
     if results.frequency_domain and "psd_frequencies" in results.frequency_domain:
-        freqs = results.frequency_domain["psd_frequencies"]
-        power = results.frequency_domain["psd_power"]
-        ax2.semilogy(freqs, power, "b-", linewidth=1.5)
-        ax2.axvspan(0.04, 0.15, alpha=0.2, color="green", label="LF")
-        ax2.axvspan(0.15, 0.4, alpha=0.2, color="red", label="HF")
-        ax2.set_xlabel("Frequency (Hz)")
-        ax2.set_ylabel("Power (ms²/Hz)")
-        ax2.set_title("PSD")
-        ax2.legend()
+        try:
+            freqs = results.frequency_domain["psd_frequencies"]
+            power = results.frequency_domain["psd_power"]
+            if freqs is not None and power is not None and len(freqs) == len(power):
+                ax2.semilogy(freqs, power, "b-", linewidth=1.5)
+                ax2.axvspan(0.04, 0.15, alpha=0.2, color="green", label="LF")
+                ax2.axvspan(0.15, 0.4, alpha=0.2, color="red", label="HF")
+                ax2.set_xlabel("Frequency (Hz)")
+                ax2.set_ylabel("Power (ms²/Hz)")
+                ax2.set_title("PSD")
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+            else:
+                ax2.set_title("PSD - Data Error")
+                ax2.text(
+                    0.5,
+                    0.5,
+                    "Invalid PSD data",
+                    ha="center",
+                    va="center",
+                    transform=ax2.transAxes,
+                )
+        except Exception as e:
+            ax2.set_title("PSD - Error")
+            ax2.text(
+                0.5,
+                0.5,
+                f"Error plotting PSD:\n{str(e)[:50]}",
+                ha="center",
+                va="center",
+                transform=ax2.transAxes,
+            )
+    else:
+        ax2.set_title("PSD - No Data")
+        ax2.text(
+            0.5,
+            0.5,
+            "Frequency domain\nanalysis not available",
+            ha="center",
+            va="center",
+            transform=ax2.transAxes,
+        )
 
     # 3. Poincaré
     ax3 = fig.add_subplot(gs[1, 0])
     plot_poincare_analysis(ax3, bundle, results.nonlinear)
 
-    # 4. Quality assessment
+    # 4. Quality assessment (FIXED)
     ax4 = fig.add_subplot(gs[1, 1])
     plot_quality_assessment(
         ax4, results.quality_assessment, results.preprocessing_stats

@@ -55,7 +55,7 @@ class HRVAnalysisResults:
         Returns:
             Dictionary containing all analysis results
         """
-        return {
+        result_dict = {
             "time_domain": self.time_domain,
             "frequency_domain": self.frequency_domain,
             "freq_domain": self.frequency_domain,  # Alternative key for compatibility
@@ -66,6 +66,16 @@ class HRVAnalysisResults:
             "analysis_info": self.analysis_info,
             "warnings": self.warnings or [],
         }
+
+        # Clean out private analyzer references for serialization
+        if self.frequency_domain and "_analyzer" in self.frequency_domain:
+            cleaned_freq_domain = {
+                k: v for k, v in self.frequency_domain.items() if not k.startswith("_")
+            }
+            result_dict["frequency_domain"] = cleaned_freq_domain
+            result_dict["freq_domain"] = cleaned_freq_domain
+
+        return result_dict
 
 
 class UnifiedHRVPipeline:
@@ -172,7 +182,76 @@ class UnifiedHRVPipeline:
                 analysis_window=window,
             )
 
-            return analyzer.get_results()
+            # Get basic results (spectral metrics)
+            results = analyzer.get_results()
+
+            if results is None:
+                return None
+
+            # ENHANCEMENT: Add PSD data for plotting using your existing method
+            try:
+                freqs, psd = analyzer.get_psd()
+                results["psd_frequencies"] = freqs
+                results["psd_power"] = psd
+                results["psd_available"] = len(freqs) > 0 and len(psd) > 0
+            except Exception as e:
+                warnings.warn(f"Failed to get PSD data: {e}")
+                results["psd_frequencies"] = np.array([])
+                results["psd_power"] = np.array([])
+                results["psd_available"] = False
+
+            # ENHANCEMENT: Add organized band powers using your existing method
+            try:
+                band_summary = analyzer.get_band_powers_summary()
+                results["band_powers_summary"] = band_summary
+
+                # Also flatten some key metrics for easier access by widgets
+                for band_name, band_data in band_summary.items():
+                    if band_name != "lf_hf_ratio":
+                        results[f"{band_name}_power"] = band_data.get(
+                            "absolute_power", 0.0
+                        )
+                        results[f"{band_name}_power_rel"] = band_data.get(
+                            "relative_power_pct", 0.0
+                        )
+                        if "peak_frequency" in band_data:
+                            results[f"peak_freq_{band_name}"] = band_data[
+                                "peak_frequency"
+                            ]
+
+                # Add LF/HF ratio
+                if "lf_hf_ratio" in band_summary:
+                    lf_hf_data = band_summary["lf_hf_ratio"]
+                    results["lf_hf_ratio"] = lf_hf_data.get("value", float("nan"))
+                    results["relative_lf_power"] = lf_hf_data.get(
+                        "relative_lf_pct", 0.0
+                    )
+                    results["relative_hf_power"] = lf_hf_data.get(
+                        "relative_hf_pct", 0.0
+                    )
+
+            except Exception as e:
+                warnings.warn(f"Failed to get band powers summary: {e}")
+
+            # Store analyzer reference for potential future use
+            results["_analyzer"] = analyzer  # Private reference, won't be serialized
+
+            print(f"=== Frequency Domain Pipeline Debug ===")
+            print(
+                f"Basic results keys: {[k for k in results.keys() if not k.startswith('_')]}"
+            )
+            print(f"PSD available: {results.get('psd_available', False)}")
+            print(
+                f"PSD shapes: freqs={results.get('psd_frequencies', np.array([])).shape}, "
+                f"psd={results.get('psd_power', np.array([])).shape}"
+            )
+            print(
+                f"Key powers: LF={results.get('lf_power', 'missing')}, "
+                f"HF={results.get('hf_power', 'missing')}"
+            )
+            print("=== End Frequency Domain Debug ===")
+
+            return results
 
         except Exception as e:
             warnings.warn(f"Frequency domain analysis failed: {e}")

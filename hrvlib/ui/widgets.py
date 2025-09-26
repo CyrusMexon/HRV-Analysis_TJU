@@ -1,7 +1,7 @@
 """
-Enhanced widgets.py
-Comprehensive widget collection for HRV analysis GUI
-Separated from app.py for better code organization and maintainability
+Enhanced widgets.py - FIXED VERSION
+Only the specific widgets with issues have been modified
+All original classes and logic preserved
 """
 
 import os
@@ -134,122 +134,763 @@ class MetaPanel(QtWidgets.QFrame):
         self.update_meta(meta_dict)
 
 
-class ResultsPanel(QtWidgets.QTextEdit):
-    """Enhanced read-only area to show metrics & warnings with better formatting."""
+### FIXED Results Panel and Sub-widgets ###
+class MetricSectionWidget(QtWidgets.QWidget):
+    """Base widget for displaying a section of HRV metrics"""
+
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.title = title
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Section header
+        self.header = QtWidgets.QLabel(self.title)
+        self.header.setStyleSheet(
+            """
+            QLabel {
+                background-color: #d0d0d0;
+                padding: 12px 18px;
+                font-weight: 600;
+                color: #000000;
+                font-size: 14px;
+                border: 1px solid #cccccc;
+                border-bottom: 1px solid #bbbbbb;
+            }
+        """
+        )
+
+        # Content area
+        self.content_widget = QtWidgets.QWidget()
+        self.content_widget.setStyleSheet(
+            """
+            QWidget {
+                background-color: grey;
+                border: none;
+                border-top: none;
+            }
+        """
+        )
+
+        layout.addWidget(self.header)
+        layout.addWidget(self.content_widget)
+
+    def set_content_layout(self, layout):
+        """Set the layout for the content area"""
+        self.content_widget.setLayout(layout)
+
+
+class TimeDomainWidget(MetricSectionWidget):
+    """Widget for displaying time domain metrics"""
+
+    def __init__(self, parent=None):
+        super().__init__("Time Domain Analysis", parent)
+        self.setup_content()
+
+    def setup_content(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        # Create table
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Metric", "Value", "Unit"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setShowGrid(False)  # Disable grid lines
+        self.table.setFrameStyle(QtWidgets.QFrame.Shape.NoFrame)  # Remove frame
+
+        # FIXED: Style the table with black text and larger rows
+        self.table.setStyleSheet(
+            """
+            QTableWidget {
+                gridline-color: transparent;
+                background-color: grey;
+                border: none;
+                color: #000000;
+            }
+            QTableWidget::item {
+                padding: 12px 8px;
+                border-bottom: 1px solid #e0e0e0;
+                color: #000000;
+                min-height: 20px;
+            }
+            QTableWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+            QHeaderView::section {
+                background-color: #eeeeee;
+                padding: 12px 8px;
+                border: none;
+                border-bottom: 1px solid #dddddd;
+                font-weight: 600;
+                color: #000000;
+                min-height: 20px;
+            }
+        """
+        )
+
+        # FIXED: Set row height
+        self.table.verticalHeader().setDefaultSectionSize(40)
+
+        layout.addWidget(self.table)
+        self.set_content_layout(layout)
+
+    def update_metrics(self, time_domain_data):
+        """Update the table with time domain metrics"""
+        if not time_domain_data:
+            self.table.setRowCount(0)
+            return
+
+        metrics = [
+            ("sdnn", "SDNN", "ms"),
+            ("rmssd", "RMSSD", "ms"),
+            ("pnn50", "pNN50", "%"),
+            ("pnn20", "pNN20", "%"),
+            ("mean_rr", "Mean RR", "ms"),
+            ("mean_hr", "Mean HR", "bpm"),
+            ("cvnn", "CV", ""),
+            ("hrv_triangular_index", "HRV Triangular Index", ""),
+            ("tinn", "TINN", "ms"),
+        ]
+
+        # Filter only available metrics
+        available_metrics = [
+            (key, name, unit)
+            for key, name, unit in metrics
+            if key in time_domain_data
+            and isinstance(time_domain_data[key], (int, float))
+        ]
+
+        self.table.setRowCount(len(available_metrics))
+
+        for row, (key, name, unit) in enumerate(available_metrics):
+            value = time_domain_data[key]
+
+            # Metric name
+            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            # Value
+            value_item = QtWidgets.QTableWidgetItem(f"{value:.2f}")
+            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            value_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+
+            # Unit
+            unit_item = QtWidgets.QTableWidgetItem(unit)
+            unit_item.setFlags(unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            self.table.setItem(row, 0, name_item)
+            self.table.setItem(row, 1, value_item)
+            self.table.setItem(row, 2, unit_item)
+
+        self.table.resizeColumnsToContents()
+        # FIXED: Set minimum height to show all rows without scrolling
+        row_height = 40
+        header_height = 40
+        min_height = len(available_metrics) * row_height + header_height + 20
+        self.table.setMinimumHeight(min_height)
+
+
+class FrequencyDomainWidget(MetricSectionWidget):
+    """Widget for displaying frequency domain metrics"""
+
+    def __init__(self, parent=None):
+        super().__init__("Frequency Domain Analysis", parent)
+        self.setup_content()
+
+    def setup_content(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Metric", "Value", "Unit"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setShowGrid(False)  # Disable grid lines
+        self.table.setFrameStyle(QtWidgets.QFrame.Shape.NoFrame)  # Remove frame
+
+        # FIXED: Updated styling and colors
+        self.table.setStyleSheet(
+            """
+            QTableWidget {
+                gridline-color: transparent;
+                background-color: grey;
+                border: none;
+                color: #000000;
+            }
+            QTableWidget::item {
+                padding: 12px 8px;
+                border-bottom: 1px solid #e0e0e0;
+                color: #000000;
+                min-height: 20px;
+            }
+            QTableWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+            QHeaderView::section {
+                background-color: #eeeeee;
+                padding: 12px 8px;
+                border: none;
+                border-bottom: 1px solid #dddddd;
+                font-weight: 600;
+                color: #000000;
+                min-height: 20px;
+            }
+        """
+        )
+
+        # FIXED: Set row height
+        self.table.verticalHeader().setDefaultSectionSize(40)
+
+        layout.addWidget(self.table)
+        self.set_content_layout(layout)
+
+    def update_metrics(self, frequency_data):
+        """Update the table with frequency domain metrics"""
+        if not frequency_data:
+            self.table.setRowCount(0)
+            return
+
+        metrics = [
+            ("VLF_power", "VLF Power", "ms²"),
+            ("LF_power", "LF Power", "ms²"),
+            ("HF_power", "HF Power", "ms²"),
+            ("total_power", "Total Power", "ms²"),
+            ("LF_HF_ratio", "LF/HF Ratio", ""),
+            ("LF_nu", "LF (n.u.)", "%"),
+            ("HF_nu", "HF (n.u.)", "%"),
+        ]
+
+        available_metrics = [
+            (key, name, unit)
+            for key, name, unit in metrics
+            if key in frequency_data and isinstance(frequency_data[key], (int, float))
+        ]
+
+        self.table.setRowCount(len(available_metrics))
+
+        for row, (key, name, unit) in enumerate(available_metrics):
+            value = frequency_data[key]
+
+            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            value_item = QtWidgets.QTableWidgetItem(f"{value:.2f}")
+            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            value_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+
+            unit_item = QtWidgets.QTableWidgetItem(unit)
+            unit_item.setFlags(unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            self.table.setItem(row, 0, name_item)
+            self.table.setItem(row, 1, value_item)
+            self.table.setItem(row, 2, unit_item)
+
+        self.table.resizeColumnsToContents()
+        # FIXED: Set minimum height to show all rows without scrolling
+        row_height = 40
+        header_height = 40
+        min_height = len(available_metrics) * row_height + header_height + 20
+        self.table.setMinimumHeight(min_height)
+
+
+class NonlinearWidget(MetricSectionWidget):
+    """Widget for displaying nonlinear metrics with subsections"""
+
+    def __init__(self, parent=None):
+        super().__init__("Nonlinear Analysis", parent)
+        self.setup_content()
+
+    def setup_content(self):
+        self.main_layout = QtWidgets.QVBoxLayout()
+        self.set_content_layout(self.main_layout)
+
+    def update_metrics(self, nonlinear_data):
+        """Update with nonlinear metrics data"""
+        # Clear existing widgets
+        for i in reversed(range(self.main_layout.count())):
+            self.main_layout.itemAt(i).widget().setParent(None)
+
+        if not nonlinear_data:
+            return
+
+        # Poincare Plot
+        if "poincare" in nonlinear_data and isinstance(
+            nonlinear_data["poincare"], dict
+        ):
+            poincare_widget = self.create_subsection(
+                "Poincaré Plot",
+                nonlinear_data["poincare"],
+                [
+                    ("sd1", "SD1", "ms"),
+                    ("sd2", "SD2", "ms"),
+                    ("sd1_sd2_ratio", "SD1/SD2 Ratio", ""),
+                    ("ellipse_area", "Ellipse Area", "ms²"),
+                ],
+            )
+            self.main_layout.addWidget(poincare_widget)
+
+        # DFA
+        if "dfa" in nonlinear_data and isinstance(nonlinear_data["dfa"], dict):
+            dfa_widget = self.create_subsection(
+                "Detrended Fluctuation Analysis",
+                nonlinear_data["dfa"],
+                [
+                    ("alpha1", "DFA α1", ""),
+                    ("alpha2", "DFA α2", ""),
+                ],
+            )
+            self.main_layout.addWidget(dfa_widget)
+
+        # Sample Entropy
+        if "sample_entropy" in nonlinear_data:
+            entropy_data = {"sample_entropy": nonlinear_data["sample_entropy"]}
+            entropy_widget = self.create_subsection(
+                "Entropy Analysis",
+                entropy_data,
+                [
+                    ("sample_entropy", "Sample Entropy", ""),
+                ],
+            )
+            self.main_layout.addWidget(entropy_widget)
+
+    def create_subsection(self, title, data, metrics):
+        """Create a subsection widget for nonlinear metrics"""
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Subsection title
+        title_label = QtWidgets.QLabel(title)
+        title_label.setStyleSheet(
+            """
+            QLabel {
+                background-color: #e6e6e6;
+                padding: 8px 18px;
+                font-weight: 600;
+                color: #000000;
+                font-size: 12px;
+                text-transform: uppercase;
+                border-bottom: 1px solid #dddddd;
+            }
+        """
+        )
+
+        # Table
+        table = QtWidgets.QTableWidget()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["Metric", "Value", "Unit"])
+        table.horizontalHeader().setVisible(False)
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setDefaultSectionSize(35)
+
+        # FIXED: Updated styling
+        table.setStyleSheet(
+            """
+            QTableWidget {
+                gridline-color: #e0e0e0;
+                background-color: #C9CDCF;
+                border: none;
+                color: #000000;
+            }
+            QTableWidget::item {
+                padding: 8px 12px;
+                border-bottom: 1px solid #e0e0e0;
+                color: #000000;
+                min-height: 18px;
+            }
+            QTableWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+        """
+        )
+
+        # Populate table
+        available_metrics = [
+            (key, name, unit)
+            for key, name, unit in metrics
+            if key in data and isinstance(data[key], (int, float))
+        ]
+
+        table.setRowCount(len(available_metrics))
+
+        for row, (key, name, unit) in enumerate(available_metrics):
+            value = float(data[key])
+
+            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            # Use more precision for some metrics
+            precision = 3 if "alpha" in key or "entropy" in key else 2
+            value_item = QtWidgets.QTableWidgetItem(f"{value:.{precision}f}")
+            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            value_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+
+            unit_item = QtWidgets.QTableWidgetItem(unit)
+            unit_item.setFlags(unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            table.setItem(row, 0, name_item)
+            table.setItem(row, 1, value_item)
+            table.setItem(row, 2, unit_item)
+
+        table.resizeColumnsToContents()
+        # FIXED: Set height to fit content
+        row_height = 35
+        min_height = len(available_metrics) * row_height + 10
+        table.setMaximumHeight(min_height)
+        table.setMinimumHeight(min_height)
+
+        layout.addWidget(title_label)
+        layout.addWidget(table)
+
+        return widget
+
+
+class QualityAssessmentSectionWidget(MetricSectionWidget):
+    """Widget for displaying quality assessment"""
+
+    def __init__(self, parent=None):
+        super().__init__("Quality Assessment", parent)
+        self.setup_content()
+
+    def setup_content(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        # Quality badge
+        self.badge_widget = QtWidgets.QWidget()
+        badge_layout = QtWidgets.QHBoxLayout(self.badge_widget)
+        badge_layout.setContentsMargins(18, 15, 18, 15)
+
+        self.quality_badge = QtWidgets.QLabel("UNKNOWN")
+        self.quality_badge.setStyleSheet(
+            """
+            QLabel {
+                padding: 6px 14px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                text-transform: uppercase;
+                background-color: #C9CDCF;
+                color: #000000;
+                border: 1px solid #dee2e6;
+            }
+        """
+        )
+
+        badge_layout.addWidget(self.quality_badge)
+        badge_layout.addStretch()
+
+        # Metrics table
+        self.table = QtWidgets.QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Metric", "Value", "Unit"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(40)
+
+        # FIXED: Updated styling
+        self.table.setStyleSheet(
+            """
+            QTableWidget {
+                gridline-color: #e0e0e0;
+                background-color: #C9CDCF;
+                border: none;
+                color: #000000;
+            }
+            QTableWidget::item {
+                padding: 12px 8px;
+                border-bottom: 1px solid #e0e0e0;
+                color: #000000;
+                min-height: 20px;
+            }
+            QTableWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+            QHeaderView::section {
+                background-color: #eeeeee;
+                padding: 12px 8px;
+                border: none;
+                border-bottom: 1px solid #dddddd;
+                font-weight: 600;
+                color: #000000;
+                min-height: 20px;
+            }
+        """
+        )
+
+        layout.addWidget(self.badge_widget)
+        layout.addWidget(self.table)
+        self.set_content_layout(layout)
+
+    def update_quality(self, quality_data):
+        """Update quality assessment display"""
+        if not quality_data:
+            return
+
+        # Update badge
+        overall_quality = quality_data.get("overall_quality", "unknown")
+        self.quality_badge.setText(overall_quality.upper())
+
+        # Color code the badge
+        if overall_quality == "good":
+            style = (
+                "background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;"
+            )
+        elif overall_quality == "fair":
+            style = (
+                "background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;"
+            )
+        elif overall_quality == "poor":
+            style = (
+                "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;"
+            )
+        else:
+            style = (
+                "background-color: #f8f9fa; color: #6c757d; border: 1px solid #dee2e6;"
+            )
+
+        self.quality_badge.setStyleSheet(
+            f"""
+            QLabel {{
+                padding: 6px 14px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                text-transform: uppercase;
+                {style}
+            }}
+        """
+        )
+
+        # Update metrics table
+        metrics = [
+            ("artifact_percentage", "Corrected Beats", "%"),
+            ("duration_s", "Recording Duration", "s"),
+        ]
+
+        available_metrics = [
+            (key, name, unit)
+            for key, name, unit in metrics
+            if key in quality_data and isinstance(quality_data[key], (int, float))
+        ]
+
+        self.table.setRowCount(len(available_metrics))
+
+        for row, (key, name, unit) in enumerate(available_metrics):
+            value = quality_data[key]
+
+            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            value_item = QtWidgets.QTableWidgetItem(f"{value:.1f}")
+            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            value_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+
+            unit_item = QtWidgets.QTableWidgetItem(unit)
+            unit_item.setFlags(unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+
+            self.table.setItem(row, 0, name_item)
+            self.table.setItem(row, 1, value_item)
+            self.table.setItem(row, 2, unit_item)
+
+        self.table.resizeColumnsToContents()
+
+        # FIXED: Set table height
+        row_height = 40
+        header_height = 40
+        min_height = len(available_metrics) * row_height + header_height + 20
+        self.table.setMinimumHeight(min_height)
+
+
+class WarningsWidget(MetricSectionWidget):
+    """Widget for displaying warnings and analysis notes"""
+
+    def __init__(self, parent=None):
+        super().__init__("Analysis Notes & Warnings", parent)
+        self.setup_content()
+
+    def setup_content(self):
+        layout = QtWidgets.QVBoxLayout()
+
+        self.warnings_list = QtWidgets.QListWidget()
+
+        self.warnings_list.setStyleSheet(
+            """
+            QListWidget {
+                background-color: #C9CDCF;
+                border: none;
+                padding: 8px;
+                color: #000000;
+            }
+            QListWidget::item {
+                padding: 8px 12px;
+                border-bottom: 1px solid #e0e0e0;
+                color: #cc0000;
+                font-size: 12px;
+                min-height: 20px;
+            }
+            QListWidget::item:last-child {
+                border-bottom: none;
+            }
+        """
+        )
+
+        layout.addWidget(self.warnings_list)
+        self.set_content_layout(layout)
+
+    def update_warnings(self, warnings_data, quality_data=None):
+        """Update warnings display"""
+        self.warnings_list.clear()
+
+        all_warnings = []
+
+        # Add general warnings
+        if warnings_data:
+            all_warnings.extend(warnings_data)
+
+        # Add quality recommendations
+        if quality_data and "recommendations" in quality_data:
+            all_warnings.extend(quality_data["recommendations"])
+
+        if not all_warnings:
+            item = QtWidgets.QListWidgetItem("No warnings or notes")
+            item.setForeground(QtGui.QColor("#666666"))  # Gray color for "no warnings"
+            self.warnings_list.addItem(item)
+            return
+
+        for warning in all_warnings:
+            item = QtWidgets.QListWidgetItem(f"• {warning}")
+            self.warnings_list.addItem(item)
+
+
+# Updated ResultsPanel - UNCHANGED except for styling fixes
+class ResultsPanel(QtWidgets.QScrollArea):
+    """Enhanced results panel using modular widgets"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setReadOnly(True)
-        self.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
+        self.setWidgetResizable(True)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        # Set monospace font for better alignment
-        font = QtGui.QFont("Consolas", 10)
-        if not font.exactMatch():
-            font = QtGui.QFont("Courier", 10)
-        self.setFont(font)
+        self.setup_ui()
 
-        # Style the text area
+    def setup_ui(self):
+        # Main widget
+        main_widget = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(main_widget)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(40, 40, 40, 40)
+
+        # Header
+        header = QtWidgets.QLabel("HRV Analysis Report")
+        header.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        header.setStyleSheet(
+            """
+            QLabel {
+                background-color: #C9CDCF;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                padding: 30px;
+                font-size: 18px;
+                font-weight: 600;
+                color: #000000;
+            }
+        """
+        )
+        main_layout.addWidget(header)
+
+        # Create section widgets
+        self.time_domain_widget = TimeDomainWidget()
+        self.frequency_domain_widget = FrequencyDomainWidget()
+        self.nonlinear_widget = NonlinearWidget()
+        self.quality_widget = QualityAssessmentSectionWidget()
+        self.warnings_widget = WarningsWidget()
+
+        main_layout.addWidget(self.time_domain_widget)
+        main_layout.addWidget(self.frequency_domain_widget)
+        main_layout.addWidget(self.nonlinear_widget)
+        main_layout.addWidget(self.quality_widget)
+        main_layout.addWidget(self.warnings_widget)
+        main_layout.addStretch()
+
+        self.setWidget(main_widget)
+
+        # Style the scroll area
         self.setStyleSheet(
             """
-            QTextEdit {
-                background-color: #f8f8f8;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 8px;
-                color: #000000; /* Text color */
+            QScrollArea {
+                background-color: #C9CDCF;
+                border: none;
             }
         """
         )
 
     def show_results(self, results: dict):
-        """Display results with enhanced formatting"""
-        lines = []
+        """FIXED: Update all section widgets with results data - with debugging."""
+        print("=== ResultsPanel.show_results Debug ===")
+        print(f"Results keys: {list(results.keys()) if results else 'None'}")
 
-        # Header with timestamp
-        lines.append("=" * 60)
-        lines.append("HRV ANALYSIS RESULTS")
-        lines.append("=" * 60)
-        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append("")
+        # Update each section with debugging
+        time_domain = results.get("time_domain")
+        print(
+            f"Time domain data: {list(time_domain.keys()) if time_domain else 'None'}"
+        )
+        self.time_domain_widget.update_metrics(time_domain)
 
-        # Time-domain metrics
-        td = results.get("time_domain")
-        if td:
-            lines.append("TIME DOMAIN METRICS")
-            lines.append("-" * 30)
-            for k, v in td.items():
-                if isinstance(v, (int, float)):
-                    lines.append(f"{k:15}: {v:8.3f}")
-                else:
-                    lines.append(f"{k:15}: {v}")
-            lines.append("")
+        # Try multiple possible keys for frequency domain data
+        freq_data = (
+            results.get("frequency_domain")
+            or results.get("freq_domain")
+            or results.get("frequency")
+            or results.get("freq")
+        )
+        print(
+            f"Frequency domain data: {list(freq_data.keys()) if freq_data else 'None'}"
+        )
+        self.frequency_domain_widget.update_metrics(freq_data)
 
-        # Frequency-domain metrics
-        fd = results.get("frequency_domain") or results.get("freq_domain")
-        if fd:
-            lines.append("FREQUENCY DOMAIN METRICS")
-            lines.append("-" * 30)
-            for k, v in fd.items():
-                if isinstance(v, (int, float)):
-                    lines.append(f"{k:15}: {v:8.3f}")
-                else:
-                    lines.append(f"{k:15}: {v}")
-            lines.append("")
+        nonlinear_data = results.get("nonlinear")
+        print(
+            f"Nonlinear data: {list(nonlinear_data.keys()) if nonlinear_data else 'None'}"
+        )
+        self.nonlinear_widget.update_metrics(nonlinear_data)
 
-        # Nonlinear metrics
-        nl = results.get("nonlinear")
-        if nl:
-            lines.append("NONLINEAR METRICS")
-            lines.append("-" * 30)
-            for k, v in nl.items():
-                if isinstance(v, (int, float)):
-                    lines.append(f"{k:15}: {v:8.3f}")
-                else:
-                    lines.append(f"{k:15}: {v}")
-            lines.append("")
+        quality_data = results.get("quality_assessment")
+        print(f"Quality data: {list(quality_data.keys()) if quality_data else 'None'}")
+        self.quality_widget.update_quality(quality_data)
 
-        # Respiratory metrics
-        resp = results.get("respiratory")
-        if resp:
-            lines.append("RESPIRATORY METRICS")
-            lines.append("-" * 30)
-            for k, v in resp.items():
-                if isinstance(v, (int, float)):
-                    lines.append(f"{k:15}: {v:8.3f}")
-                elif isinstance(v, dict):
-                    lines.append(f"{k:15}: {v}")
-                else:
-                    lines.append(f"{k:15}: {v}")
-            lines.append("")
+        self.warnings_widget.update_warnings(results.get("warnings"), quality_data)
+        print("=== End Debug ===")
 
-        # Quality assessment
-        qa = results.get("quality_assessment")
-        if qa:
-            lines.append("QUALITY ASSESSMENT")
-            lines.append("-" * 30)
-            for k, v in qa.items():
-                lines.append(f"{k:15}: {v}")
-            lines.append("")
 
-        # Preprocessing statistics
-        ps = results.get("preprocessing_stats")
-        if ps:
-            lines.append("PREPROCESSING SUMMARY")
-            lines.append("-" * 30)
-            for k, v in ps.items():
-                lines.append(f"{k:15}: {v}")
-            lines.append("")
-
-        # Warnings
-        warnings = results.get("warnings", [])
-        if warnings:
-            lines.append("WARNINGS & ALERTS")
-            lines.append("-" * 30)
-            for w in warnings:
-                lines.append(f"⚠ {w}")
-            lines.append("")
-
-        self.setPlainText("\n".join(lines))
+### End - Fixed Results Panel and Sub-widgets ###
 
 
 class AnalysisParametersWidget(QtWidgets.QWidget):
