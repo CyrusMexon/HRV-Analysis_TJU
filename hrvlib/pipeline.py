@@ -165,7 +165,7 @@ class UnifiedHRVPipeline:
     ) -> Optional[Dict]:
         """Run frequency domain analysis on preprocessed data"""
         try:
-            config = self.analysis_config.get("frequency_domain", {})
+            config = self.analysis_config.get("freq_domain", {})
             if not config.get("enabled", True):
                 return None
 
@@ -235,21 +235,6 @@ class UnifiedHRVPipeline:
 
             # Store analyzer reference for potential future use
             results["_analyzer"] = analyzer  # Private reference, won't be serialized
-
-            print(f"=== Frequency Domain Pipeline Debug ===")
-            print(
-                f"Basic results keys: {[k for k in results.keys() if not k.startswith('_')]}"
-            )
-            print(f"PSD available: {results.get('psd_available', False)}")
-            print(
-                f"PSD shapes: freqs={results.get('psd_frequencies', np.array([])).shape}, "
-                f"psd={results.get('psd_power', np.array([])).shape}"
-            )
-            print(
-                f"Key powers: LF={results.get('lf_power', 'missing')}, "
-                f"HF={results.get('hf_power', 'missing')}"
-            )
-            print("=== End Frequency Domain Debug ===")
 
             return results
 

@@ -853,15 +853,10 @@ class ResultsPanel(QtWidgets.QScrollArea):
         )
 
     def show_results(self, results: dict):
-        """FIXED: Update all section widgets with results data - with debugging."""
-        print("=== ResultsPanel.show_results Debug ===")
-        print(f"Results keys: {list(results.keys()) if results else 'None'}")
+        """FIXED: Update all section widgets with results data"""
 
         # Update each section with debugging
         time_domain = results.get("time_domain")
-        print(
-            f"Time domain data: {list(time_domain.keys()) if time_domain else 'None'}"
-        )
         self.time_domain_widget.update_metrics(time_domain)
 
         # Try multiple possible keys for frequency domain data
@@ -871,26 +866,16 @@ class ResultsPanel(QtWidgets.QScrollArea):
             or results.get("frequency")
             or results.get("freq")
         )
-        print(
-            f"Frequency domain data: {list(freq_data.keys()) if freq_data else 'None'}"
-        )
+
         self.frequency_domain_widget.update_metrics(freq_data)
 
         nonlinear_data = results.get("nonlinear")
-        print(
-            f"Nonlinear data: {list(nonlinear_data.keys()) if nonlinear_data else 'None'}"
-        )
         self.nonlinear_widget.update_metrics(nonlinear_data)
 
         quality_data = results.get("quality_assessment")
-        print(f"Quality data: {list(quality_data.keys()) if quality_data else 'None'}")
         self.quality_widget.update_quality(quality_data)
 
         self.warnings_widget.update_warnings(results.get("warnings"), quality_data)
-        print("=== End Debug ===")
-
-
-### End - Fixed Results Panel and Sub-widgets ###
 
 
 class AnalysisParametersWidget(QtWidgets.QWidget):
