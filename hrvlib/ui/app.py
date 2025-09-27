@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import QThread
 
 from hrvlib.data_handler import load_rr_file, DataBundle
@@ -231,15 +231,297 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Analysis complete")
         print("=== End Debug ===")
 
+    # Replace your existing export_results method in app.py with this complete implementation
+
     def export_results(self):
+        """Enhanced export results method - SRS Compliant (FR-24 to FR-30)"""
         if not self.current_results:
-            return
-        dialog = ExportDialog(self)
-        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            settings = dialog.get_export_settings()
-            QtWidgets.QMessageBox.information(
-                self, "Export", f"Export settings:\n{settings}"
+            QtWidgets.QMessageBox.warning(
+                self, "Export Warning", "No analysis results available for export."
             )
+            return
+
+        if not self.current_bundle:
+            QtWidgets.QMessageBox.warning(
+                self, "Export Warning", "No data bundle available for export."
+            )
+            return
+
+        # Import the export system
+        try:
+            from hrvlib.export_system import HRVExporter
+        except ImportError:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Import Error",
+                "Export system not found. Please ensure export_system.py is in hrvlib directory.",
+            )
+            return
+
+        # Create export dialog
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Export Results - SRS Compliant (FR-24 to FR-30)")
+        dialog.setModal(True)
+        dialog.resize(450, 400)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        # Title
+        title_label = QtWidgets.QLabel("Export HRV Analysis Results")
+        title_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title_label)
+
+        # Format selection group
+        format_group = QtWidgets.QGroupBox("Export Formats (Select at least one)")
+        format_layout = QtWidgets.QVBoxLayout(format_group)
+
+        pdf_cb = QtWidgets.QCheckBox("PDF Report (Comprehensive)")
+        pdf_cb.setToolTip(
+            "Multi-page PDF with plots, metrics tables, quality assessment"
+        )
+        pdf_cb.setChecked(True)
+
+        csv_cb = QtWidgets.QCheckBox("CSV Metrics (Standard)")
+        csv_cb.setToolTip("Comma-separated values file with all computed metrics")
+
+        spss_cb = QtWidgets.QCheckBox("SPSS-compatible CSV")
+        spss_cb.setToolTip("CSV formatted for SPSS with proper variable naming")
+
+        audit_cb = QtWidgets.QCheckBox("Audit Trail (JSON)")
+        audit_cb.setToolTip("Complete log of analysis parameters and processing steps")
+
+        format_layout.addWidget(pdf_cb)
+        format_layout.addWidget(csv_cb)
+        format_layout.addWidget(spss_cb)
+        format_layout.addWidget(audit_cb)
+
+        layout.addWidget(format_group)
+
+        # Content options group
+        content_group = QtWidgets.QGroupBox("Content Options")
+        content_layout = QtWidgets.QVBoxLayout(content_group)
+
+        plots_cb = QtWidgets.QCheckBox("Include plots in PDF")
+        plots_cb.setChecked(True)
+
+        preprocessing_cb = QtWidgets.QCheckBox("Include preprocessing details")
+        preprocessing_cb.setChecked(True)
+
+        quality_cb = QtWidgets.QCheckBox("Include quality assessment")
+        quality_cb.setChecked(True)
+
+        params_cb = QtWidgets.QCheckBox("Include analysis parameters")
+        params_cb.setChecked(True)
+
+        warnings_cb = QtWidgets.QCheckBox("Include warnings and recommendations")
+        warnings_cb.setChecked(True)
+
+        content_layout.addWidget(plots_cb)
+        content_layout.addWidget(preprocessing_cb)
+        content_layout.addWidget(quality_cb)
+        content_layout.addWidget(params_cb)
+        content_layout.addWidget(warnings_cb)
+
+        layout.addWidget(content_group)
+
+        # Options group
+        options_group = QtWidgets.QGroupBox("Options")
+        options_layout = QtWidgets.QFormLayout(options_group)
+
+        decimal_spin = QtWidgets.QSpinBox()
+        decimal_spin.setRange(1, 6)
+        decimal_spin.setValue(3)
+
+        timestamp_cb = QtWidgets.QCheckBox("Include timestamp in filenames")
+        timestamp_cb.setChecked(True)
+
+        options_layout.addRow("Decimal Places:", decimal_spin)
+        options_layout.addRow("", timestamp_cb)
+
+        layout.addWidget(options_group)
+
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+
+        export_btn = QtWidgets.QPushButton("Export")
+        export_btn.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """
+        )
+        export_btn.setDefault(True)
+
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.setStyleSheet(
+            """
+            QPushButton {
+                padding: 8px 16px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }
+        """
+        )
+
+        button_layout.addStretch()
+        button_layout.addWidget(export_btn)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+
+        def perform_export():
+            """Perform the actual export operation"""
+            # Validate format selection
+            formats = {
+                "pdf": pdf_cb.isChecked(),
+                "csv": csv_cb.isChecked(),
+                "spss": spss_cb.isChecked(),
+                "audit_trail": audit_cb.isChecked(),
+            }
+
+            if not any(formats.values()):
+                QtWidgets.QMessageBox.warning(
+                    dialog, "Warning", "Please select at least one export format."
+                )
+                return
+
+            # Get base file path
+            default_name = "HRV_Analysis_Results"
+            if self.current_bundle.source and hasattr(
+                self.current_bundle.source, "path"
+            ):
+                source_path = Path(self.current_bundle.source.path)
+                default_name = f"HRV_{source_path.stem}"
+
+            base_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                dialog, "Export HRV Results", default_name, "All Files (*)"
+            )
+
+            if not base_path:
+                return  # User cancelled
+
+            # Remove any extension from base_path
+            base_path = str(Path(base_path).with_suffix(""))
+
+            try:
+                # Show progress dialog
+                progress = QtWidgets.QProgressDialog(
+                    "Exporting results...", "Cancel", 0, 100, dialog
+                )
+                progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+                progress.setAutoClose(True)
+                progress.setAutoReset(True)
+                progress.show()
+
+                # Process Qt events to show progress dialog
+                QtWidgets.QApplication.processEvents()
+
+                # Prepare export settings
+                export_settings = {
+                    "formats": formats,
+                    "content": {
+                        "include_plots": plots_cb.isChecked(),
+                        "include_preprocessing": preprocessing_cb.isChecked(),
+                        "include_quality": quality_cb.isChecked(),
+                        "include_parameters": params_cb.isChecked(),
+                        "include_warnings": warnings_cb.isChecked(),
+                    },
+                    "options": {
+                        "decimal_places": decimal_spin.value(),
+                        "include_timestamp": timestamp_cb.isChecked(),
+                    },
+                }
+
+                progress.setValue(20)
+                QtWidgets.QApplication.processEvents()
+
+                # Perform export
+                exporter = HRVExporter(
+                    self.current_bundle, self.current_results, self.analysis_parameters
+                )
+
+                progress.setValue(50)
+                QtWidgets.QApplication.processEvents()
+
+                exported_files = exporter.export_all(export_settings, base_path)
+
+                progress.setValue(100)
+                QtWidgets.QApplication.processEvents()
+
+                # Show success message
+                if exported_files:
+                    file_list = "\n".join(
+                        [
+                            f"• {fmt}: {Path(path).name}"
+                            for fmt, path in exported_files.items()
+                        ]
+                    )
+                    success_msg = (
+                        f"Export completed successfully!\n\n"
+                        f"Files created:\n{file_list}\n\n"
+                        f"Location: {Path(base_path).parent}\n\n"
+                        f"Compliance: SRS requirements FR-24 to FR-30"
+                    )
+
+                    QtWidgets.QMessageBox.information(
+                        dialog, "Export Successful", success_msg
+                    )
+                else:
+                    QtWidgets.QMessageBox.warning(
+                        dialog,
+                        "Export Warning",
+                        "No files were exported. Please check your selections.",
+                    )
+
+                progress.close()
+                dialog.accept()
+
+            except Exception as e:
+                progress.close()
+                error_msg = f"Export failed with error:\n\n{str(e)}\n\nPlease check file permissions and try again."
+                QtWidgets.QMessageBox.critical(dialog, "Export Error", error_msg)
+
+        def validate_and_enable_export():
+            """Enable/disable export button based on format selection"""
+            formats_selected = any(
+                [
+                    pdf_cb.isChecked(),
+                    csv_cb.isChecked(),
+                    spss_cb.isChecked(),
+                    audit_cb.isChecked(),
+                ]
+            )
+            export_btn.setEnabled(formats_selected)
+
+            # Enable/disable plot option based on PDF selection
+            plots_cb.setEnabled(pdf_cb.isChecked())
+            if not pdf_cb.isChecked():
+                plots_cb.setChecked(False)
+
+        # Connect signals
+        export_btn.clicked.connect(perform_export)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        # Connect format checkboxes to validation
+        pdf_cb.toggled.connect(validate_and_enable_export)
+        csv_cb.toggled.connect(validate_and_enable_export)
+        spss_cb.toggled.connect(validate_and_enable_export)
+        audit_cb.toggled.connect(validate_and_enable_export)
+
+        # Initial validation
+        validate_and_enable_export()
+
+        # Show dialog
+        dialog.exec()
 
     def save_session(self):
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
