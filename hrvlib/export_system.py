@@ -529,7 +529,7 @@ class HRVExporter:
     def _export_audit_trail(
         self, file_path: str, export_settings: Dict[str, Any]
     ) -> None:
-        """Export audit trail log (FR-30)"""
+        """Export audit trail log with manual editing information (FR-30)"""
         audit_data = {
             "export_info": {
                 "timestamp": self.export_timestamp.isoformat(),
@@ -562,6 +562,9 @@ class HRVExporter:
                     else "unknown"
                 ),
             },
+            "manual_editing_log": self.analysis_parameters.get(
+                "detailed_audit_trail", {}
+            ),
             "analysis_results_summary": {
                 "time_domain_computed": self.results.time_domain is not None,
                 "frequency_domain_computed": self.results.frequency_domain is not None,
@@ -571,8 +574,8 @@ class HRVExporter:
                 ),
             },
             "validation": {
-                "srs_compliance": "FR-24 to FR-30",
-                "export_completeness": "Complete",
+                "srs_compliance": "FR-24 to FR-30 with manual editing (FR-10 to FR-14)",
+                "export_completeness": "Complete with audit trail",
             },
         }
 

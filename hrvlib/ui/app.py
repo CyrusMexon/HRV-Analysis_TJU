@@ -1,18 +1,20 @@
 """
 app.py - Main HRV Analysis Application
 Implements GUI using PyQt6 with modular widgets (widgets.py)
-Meets SRS requirements v2.1.1
+Meets SRS requirements v2.1.1 with manual beat editing (FR-10 to FR-14)
 """
 
 import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
+from datetime import datetime
 
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import QThread
 
 from hrvlib.data_handler import load_rr_file, DataBundle
 from hrvlib.pipeline import create_unified_pipeline, HRVAnalysisResults
+from hrvlib.beat_editor import BeatEditor, EditAction, InterpolationMethod
 from hrvlib.ui.widgets import (
     MetaPanel,
     ResultsPanel,
@@ -27,11 +29,13 @@ from hrvlib.ui.workers import PipelineWorker
 
 
 class HRVMainWindow(QtWidgets.QMainWindow):
-    """Main HRV Analysis Window"""
+    """Main HRV Analysis Window with Manual Beat Editing Support"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("HRV Analysis Software v2.1.1 - SRS Compliant")
+        self.setWindowTitle(
+            "HRV Analysis Software v2.1.1 - SRS Compliant with Manual Editing"
+        )
         self.resize(1400, 900)
 
         # Data storage
@@ -39,11 +43,14 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.current_results: Optional[HRVAnalysisResults] = None
         self.analysis_parameters: Dict[str, Any] = {}
         self.edit_history: list = []
+        self.has_manual_edits: bool = False  # Track manual edits
 
         # UI setup
         self.setup_ui()
         self.setup_menu_bar()
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage(
+            "Ready - Manual editing enabled (SRS FR-10 to FR-14)"
+        )
 
     def setup_ui(self):
         """Setup central layout"""
@@ -53,8 +60,8 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         # Left control panel
         self.control_panel = QtWidgets.QWidget()
-        self.control_panel.setMinimumWidth(350)
-        self.control_panel.setMaximumWidth(400)
+        self.control_panel.setMinimumWidth(400)
+        self.control_panel.setMaximumWidth(550)
         control_layout = QtWidgets.QVBoxLayout(self.control_panel)
 
         # Metadata
@@ -70,7 +77,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.params_widget = AnalysisParametersWidget()
         params_scroll.setWidget(self.params_widget)
         params_scroll.setWidgetResizable(True)
-        params_scroll.setMaximumHeight(350)
+        # params_scroll.setMaximumHeight(600)
         params_layout.addWidget(params_scroll)
 
         # Quality assessment
@@ -79,7 +86,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         # Control buttons
         button_group = QtWidgets.QGroupBox("Analysis Control")
         button_layout = QtWidgets.QVBoxLayout(button_group)
-        self.analyze_btn = QtWidgets.QPushButton("🔍 Run Analysis")
+        self.analyze_btn = QtWidgets.QPushButton("🔬 Run Analysis")
         self.analyze_btn.setEnabled(False)
         self.export_btn = QtWidgets.QPushButton("📄 Export Results")
         self.export_btn.setEnabled(False)
@@ -107,6 +114,11 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.analyze_btn.clicked.connect(self.run_analysis)
         self.export_btn.clicked.connect(self.export_results)
 
+        # Connect beat editing signals
+        self.signal_viewer.beat_edited.connect(self.on_beat_edited)
+        self.signal_viewer.quality_updated.connect(self.on_quality_updated)
+        self.signal_viewer.reanalysis_requested.connect(self.on_reanalysis_requested)
+
     def setup_menu_bar(self):
         menubar = self.menuBar()
 
@@ -125,12 +137,15 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
 
-        # Edit
+        # Edit (UPDATED with editing features)
         edit_menu = menubar.addMenu("&Edit")
-        undo_action = edit_menu.addAction("Undo Edit")
-        undo_action.triggered.connect(self.undo_edit)
-        reset_action = edit_menu.addAction("Reset All Edits")
-        reset_action.triggered.connect(self.reset_edits)
+        undo_action = edit_menu.addAction("Undo Beat Edit")
+        undo_action.triggered.connect(self.undo_beat_edit)
+        reset_action = edit_menu.addAction("Reset All Beat Edits")
+        reset_action.triggered.connect(self.reset_beat_edits)
+        edit_menu.addSeparator()
+        reanalyze_action = edit_menu.addAction("Reanalyze with Edits")
+        reanalyze_action.triggered.connect(self.on_reanalysis_requested)
 
         # Analysis
         analysis_menu = menubar.addMenu("&Analysis")
@@ -160,6 +175,10 @@ class HRVMainWindow(QtWidgets.QMainWindow):
             bundle = load_rr_file(file_path)
             self.current_bundle = bundle
 
+            # RESET: Clear any previous edits when loading new file
+            self.has_manual_edits = False
+            self.edit_history.clear()
+
             # Use the enhanced metadata update method
             self.meta_panel.update_meta_from_bundle(bundle)
 
@@ -188,7 +207,14 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.worker.error.connect(self.on_analysis_error)
 
         self.thread.start()
-        self.statusBar().showMessage("Running analysis...")
+
+        # Update status based on whether we have manual edits
+        if self.has_manual_edits:
+            self.statusBar().showMessage(
+                "Running analysis with manually edited data..."
+            )
+        else:
+            self.statusBar().showMessage("Running analysis...")
 
     def on_analysis_error(self, error_message):
         """Handle analysis errors"""
@@ -228,13 +254,137 @@ class HRVMainWindow(QtWidgets.QMainWindow):
             print(f"Quality widget error: {e}")
 
         self.export_btn.setEnabled(True)
-        self.statusBar().showMessage("Analysis complete")
+
+        # Update status based on editing state
+        if self.has_manual_edits:
+            self.statusBar().showMessage("Analysis complete with edited data")
+        else:
+            self.statusBar().showMessage("Analysis complete")
         print("=== End Debug ===")
 
-    # Replace your existing export_results method in app.py with this complete implementation
+    # NEW METHODS for handling manual editing (SRS FR-10 to FR-14)
+
+    def on_beat_edited(self, action: str, edit_info: dict):
+        """Handle beat editing signals from SignalViewerWidget"""
+        self.has_manual_edits = True
+
+        # Log the edit
+        edit_record = {
+            "timestamp": datetime.now().isoformat(),
+            "action": action,
+            "edit_info": edit_info,
+        }
+        self.edit_history.append(edit_record)
+
+        # Update status based on action
+        if action == "reset":
+            self.has_manual_edits = False
+            self.edit_history.clear()
+            self.statusBar().showMessage(
+                "All manual edits reset - Original data restored"
+            )
+        elif action == "undo":
+            # Count remaining edits (excluding undos)
+            remaining_edits = len(
+                [e for e in self.edit_history if e["action"] not in ["undo", "reset"]]
+            )
+            if remaining_edits == 0:
+                self.has_manual_edits = False
+            self.statusBar().showMessage(
+                f"Edit undone - {remaining_edits} edits remaining"
+            )
+        else:
+            edit_count = len(
+                [e for e in self.edit_history if e["action"] not in ["undo", "reset"]]
+            )
+            self.statusBar().showMessage(
+                f"Beat {action} applied - Total edits: {edit_count}"
+            )
+
+        # Enable export if we have results
+        if self.current_results:
+            self.export_btn.setEnabled(True)
+
+    def on_quality_updated(self, corrected_percentage: float):
+        """Handle quality updates from editing (SRS FR-14)"""
+        if corrected_percentage > 5.0:
+            # Show warning in status bar for extended time
+            self.statusBar().showMessage(
+                f"⚠️ WARNING: {corrected_percentage:.1f}% beats corrected - Exceeds 5% threshold (SRS FR-14)",
+                15000,  # Show for 15 seconds
+            )
+
+            # Update window title to indicate quality issue
+            self.setWindowTitle(
+                "HRV Analysis Software v2.1.1 - ⚠️ QUALITY WARNING: >5% corrected"
+            )
+
+        elif corrected_percentage > 2.0:
+            self.statusBar().showMessage(
+                f"Quality: {corrected_percentage:.1f}% beats corrected - Monitor quality"
+            )
+            self.setWindowTitle("HRV Analysis Software v2.1.1 - Manual editing active")
+        elif corrected_percentage > 0:
+            self.statusBar().showMessage(
+                f"Quality: {corrected_percentage:.1f}% beats corrected - Good quality"
+            )
+            self.setWindowTitle("HRV Analysis Software v2.1.1 - Manual editing active")
+        else:
+            self.setWindowTitle(
+                "HRV Analysis Software v2.1.1 - SRS Compliant with Manual Editing"
+            )
+
+    def on_reanalysis_requested(self):
+        """Handle reanalysis requests after editing"""
+        if not self.current_bundle or not self.has_manual_edits:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Reanalysis",
+                "No manual edits have been made. Use 'Run Analysis' for standard analysis.",
+            )
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Reanalyze with Edited Data",
+            "Do you want to rerun the HRV analysis using the manually edited RR intervals?\n\n"
+            f"Current edits: {len([e for e in self.edit_history if e['action'] not in ['undo', 'reset']])} modifications\n\n"
+            "This will compute new HRV metrics based on your corrections.",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes,
+        )
+
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            # Get edited RR intervals from signal viewer
+            edited_rr = self.signal_viewer.get_edited_rr_intervals()
+            if edited_rr is not None:
+                # Update bundle with edited data
+                self.current_bundle.rri_ms = edited_rr.tolist()
+
+                # Run analysis with edited data
+                self.run_analysis()
+
+    def undo_beat_edit(self):
+        """Undo last beat edit via menu"""
+        if hasattr(self.signal_viewer, "_undo_last_edit"):
+            self.signal_viewer._undo_last_edit()
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "Undo", "No edits to undo or editing not available"
+            )
+
+    def reset_beat_edits(self):
+        """Reset all beat edits via menu"""
+        if hasattr(self.signal_viewer, "_reset_all_edits"):
+            self.signal_viewer._reset_all_edits()
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "Reset", "No edits to reset or editing not available"
+            )
 
     def export_results(self):
-        """Enhanced export results method - SRS Compliant (FR-24 to FR-30)"""
+        """Enhanced export results method with audit trail (SRS FR-13, FR-30)"""
         if not self.current_results:
             QtWidgets.QMessageBox.warning(
                 self, "Export Warning", "No analysis results available for export."
@@ -260,15 +410,32 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         # Create export dialog
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Export Results - SRS Compliant (FR-24 to FR-30)")
+        dialog.setWindowTitle(
+            "Export Results - SRS Compliant (FR-24 to FR-30) with Manual Editing"
+        )
         dialog.setModal(True)
-        dialog.resize(450, 400)
+        dialog.resize(450, 500)
 
         layout = QtWidgets.QVBoxLayout(dialog)
 
-        # Title
-        title_label = QtWidgets.QLabel("Export HRV Analysis Results")
-        title_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 10px;")
+        # Title with editing info
+        if self.has_manual_edits:
+            edit_count = len(
+                [e for e in self.edit_history if e["action"] not in ["undo", "reset"]]
+            )
+            title_text = (
+                f"Export HRV Analysis Results\n({edit_count} manual edits applied)"
+            )
+            color = "#ff6b35"  # Orange for edited data
+        else:
+            title_text = "Export HRV Analysis Results"
+            color = "#2c3e50"  # Default blue
+
+        title_label = QtWidgets.QLabel(title_text)
+        title_label.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; padding: 10px; color: {color};"
+        )
+        title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
 
         # Format selection group
@@ -289,6 +456,8 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         audit_cb = QtWidgets.QCheckBox("Audit Trail (JSON)")
         audit_cb.setToolTip("Complete log of analysis parameters and processing steps")
+        if self.has_manual_edits:
+            audit_cb.setChecked(True)  # Auto-select if edits were made
 
         format_layout.addWidget(pdf_cb)
         format_layout.addWidget(csv_cb)
@@ -315,6 +484,17 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         warnings_cb = QtWidgets.QCheckBox("Include warnings and recommendations")
         warnings_cb.setChecked(True)
+
+        # Manual editing options
+        editing_cb = QtWidgets.QCheckBox("Include manual editing details")
+        editing_cb.setChecked(self.has_manual_edits)
+        editing_cb.setEnabled(self.has_manual_edits)
+        if self.has_manual_edits:
+            editing_cb.setToolTip(
+                "Include complete audit trail of manual beat corrections (SRS FR-13)"
+            )
+        else:
+            editing_cb.setToolTip("No manual edits to include")
 
         content_layout.addWidget(plots_cb)
         content_layout.addWidget(preprocessing_cb)
@@ -379,7 +559,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         layout.addLayout(button_layout)
 
         def perform_export():
-            """Perform the actual export operation"""
+            """Perform the actual export operation with manual editing support"""
             # Validate format selection
             formats = {
                 "pdf": pdf_cb.isChecked(),
@@ -401,6 +581,10 @@ class HRVMainWindow(QtWidgets.QMainWindow):
             ):
                 source_path = Path(self.current_bundle.source.path)
                 default_name = f"HRV_{source_path.stem}"
+
+            # Add edited suffix if manual edits were applied
+            if self.has_manual_edits:
+                default_name += "_edited"
 
             base_path, _ = QtWidgets.QFileDialog.getSaveFileName(
                 dialog, "Export HRV Results", default_name, "All Files (*)"
@@ -425,7 +609,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
                 # Process Qt events to show progress dialog
                 QtWidgets.QApplication.processEvents()
 
-                # Prepare export settings
+                # Prepare export settings with manual editing info
                 export_settings = {
                     "formats": formats,
                     "content": {
@@ -434,6 +618,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
                         "include_quality": quality_cb.isChecked(),
                         "include_parameters": params_cb.isChecked(),
                         "include_warnings": warnings_cb.isChecked(),
+                        "include_editing": editing_cb.isChecked(),
                     },
                     "options": {
                         "decimal_places": decimal_spin.value(),
@@ -444,13 +629,38 @@ class HRVMainWindow(QtWidgets.QMainWindow):
                 progress.setValue(20)
                 QtWidgets.QApplication.processEvents()
 
+                # ENHANCED: Analysis parameters with manual editing information
+                enhanced_parameters = self.analysis_parameters.copy()
+                enhanced_parameters["manual_editing"] = {
+                    "edits_applied": self.has_manual_edits,
+                    "edit_count": len(
+                        [
+                            e
+                            for e in self.edit_history
+                            if e["action"] not in ["undo", "reset"]
+                        ]
+                    ),
+                    "edit_history_summary": (
+                        self.edit_history[-20:] if self.edit_history else []
+                    ),
+                    "srs_compliance": "FR-10 to FR-14 - Manual editing with audit trail",
+                }
+
+                # Get detailed audit trail from signal viewer
+                if self.signal_viewer and hasattr(
+                    self.signal_viewer, "get_audit_trail"
+                ):
+                    enhanced_parameters["detailed_audit_trail"] = (
+                        self.signal_viewer.get_audit_trail()
+                    )
+
+                progress.setValue(50)
+                QtWidgets.QApplication.processEvents()
+
                 # Perform export
                 exporter = HRVExporter(
                     self.current_bundle, self.current_results, self.analysis_parameters
                 )
-
-                progress.setValue(50)
-                QtWidgets.QApplication.processEvents()
 
                 exported_files = exporter.export_all(export_settings, base_path)
 
@@ -465,11 +675,24 @@ class HRVMainWindow(QtWidgets.QMainWindow):
                             for fmt, path in exported_files.items()
                         ]
                     )
+
+                    # Add manual editing info to success message
+                    edit_info = ""
+                    if self.has_manual_edits:
+                        edit_count = len(
+                            [
+                                e
+                                for e in self.edit_history
+                                if e["action"] not in ["undo", "reset"]
+                            ]
+                        )
+                        edit_info = f"\n\n✏️ Manual Editing: {edit_count} edits applied and logged in audit trail (SRS FR-13)"
+
                     success_msg = (
                         f"Export completed successfully!\n\n"
                         f"Files created:\n{file_list}\n\n"
                         f"Location: {Path(base_path).parent}\n\n"
-                        f"Compliance: SRS requirements FR-24 to FR-30"
+                        f"Compliance: SRS requirements FR-24 to FR-30 with manual editing audit trail"
                     )
 
                     QtWidgets.QMessageBox.information(
@@ -524,38 +747,322 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         dialog.exec()
 
     def save_session(self):
+        """Enhanced session save with full state preservation"""
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save Session", str(Path.cwd()), "Session Files (*.json)"
         )
-        if file_path:
-            SessionManager.save_session(
+
+        if not file_path:
+            return
+
+        try:
+            # Get detailed audit trail from signal viewer
+            signal_viewer_data = None
+            if hasattr(self.signal_viewer, "get_audit_trail"):
+                signal_viewer_data = self.signal_viewer.get_audit_trail()
+
+            success = SessionManager.save_session(
                 file_path,
                 self.analysis_parameters,
                 self.edit_history,
-                str(self.current_bundle.source.path),
+                (
+                    str(self.current_bundle.source.path)
+                    if self.current_bundle and self.current_bundle.source
+                    else ""
+                ),
                 self.current_results,
+                self.current_bundle,  # Include current data state
+                signal_viewer_data,
             )
-            self.statusBar().showMessage(f"Session saved: {file_path}")
+
+            if success:
+                edit_info = (
+                    f" (with {len([e for e in self.edit_history if e['action'] not in ['undo', 'reset']])} manual edits)"
+                    if self.has_manual_edits
+                    else ""
+                )
+                self.statusBar().showMessage(
+                    f"Session saved{edit_info}: {Path(file_path).name}"
+                )
+
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Session Saved",
+                    f"Session saved successfully!\n\n"
+                    f"File: {Path(file_path).name}\n"
+                    f"Manual edits: {'Yes' if self.has_manual_edits else 'No'}\n"
+                    f"Parameters: Preserved\n"
+                    f"Data state: Preserved",
+                )
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Save Failed",
+                    "Failed to save session. Check file permissions.",
+                )
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Save Error", f"Error saving session:\n{str(e)}"
+            )
 
     def load_session(self):
+        """Enhanced session load with full state restoration"""
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Load Session", str(Path.cwd()), "Session Files (*.json)"
         )
-        if file_path:
+
+        if not file_path:
+            return
+
+        try:
             session = SessionManager.load_session(file_path)
-            if session:
-                self.params_widget.set_parameters(
-                    session.get("analysis_parameters", {})
+            if not session:
+                QtWidgets.QMessageBox.warning(
+                    self, "Load Failed", "Invalid or corrupted session file."
                 )
-                self.statusBar().showMessage(f"Session loaded: {file_path}")
+                return
+
+            # Show session info dialog
+            self._show_session_info_dialog(session, file_path)
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Load Error", f"Error loading session:\n{str(e)}"
+            )
+
+    def _show_session_info_dialog(self, session: Dict, file_path: str):
+        """Show session information and options for loading"""
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Load Session")
+        dialog.setModal(True)
+        dialog.resize(500, 400)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        # Session info display
+        info_text = self._format_session_info(session)
+        info_label = QtWidgets.QTextEdit()
+        info_label.setPlainText(info_text)
+        info_label.setReadOnly(True)
+        info_label.setMaximumHeight(250)
+
+        layout.addWidget(QtWidgets.QLabel("Session Information:"))
+        layout.addWidget(info_label)
+
+        # Loading options
+        options_group = QtWidgets.QGroupBox("What to load:")
+        options_layout = QtWidgets.QVBoxLayout(options_group)
+
+        load_params_cb = QtWidgets.QCheckBox("Analysis Parameters")
+        load_params_cb.setChecked(True)
+
+        load_data_cb = QtWidgets.QCheckBox("Data and Manual Edits")
+        load_data_cb.setChecked("rr_data" in session)
+        load_data_cb.setEnabled("rr_data" in session)
+
+        load_file_cb = QtWidgets.QCheckBox("Reload Original File (if available)")
+        load_file_cb.setChecked(False)
+
+        options_layout.addWidget(load_params_cb)
+        options_layout.addWidget(load_data_cb)
+        options_layout.addWidget(load_file_cb)
+
+        layout.addWidget(options_group)
+
+        # Buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        load_btn = QtWidgets.QPushButton("Load Session")
+        load_btn.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 8px; }"
+        )
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+
+        button_layout.addStretch()
+        button_layout.addWidget(load_btn)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+
+        # Connect signals
+        def perform_load():
+            try:
+                self._apply_session_data(
+                    session,
+                    load_params_cb.isChecked(),
+                    load_data_cb.isChecked(),
+                    load_file_cb.isChecked(),
+                )
+                dialog.accept()
+
+                self.statusBar().showMessage(f"Session loaded: {Path(file_path).name}")
+
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(
+                    dialog, "Load Error", f"Failed to apply session data:\n{str(e)}"
+                )
+
+        load_btn.clicked.connect(perform_load)
+        cancel_btn.clicked.connect(dialog.reject)
+
+        dialog.exec()
+
+    def _format_session_info(self, session: Dict) -> str:
+        """Format session information for display"""
+        info_lines = []
+
+        # Basic info
+        session_info = session.get("session_info", {})
+        info_lines.append(f"Version: {session_info.get('version', 'Unknown')}")
+        info_lines.append(f"Created: {session_info.get('timestamp', 'Unknown')}")
+        info_lines.append("")
+
+        # Source file
+        source_file = session.get("source_file", {})
+        info_lines.append(f"Original File: {source_file.get('path', 'Unknown')}")
+        info_lines.append("")
+
+        # Manual editing info
+        manual_editing = session.get("manual_editing", {})
+        has_edits = manual_editing.get("has_edits", False)
+        edit_count = manual_editing.get("edit_count", 0)
+
+        info_lines.append(f"Manual Edits: {'Yes' if has_edits else 'No'}")
+        if has_edits:
+            info_lines.append(f"Edit Count: {edit_count}")
+            last_edit = manual_editing.get("last_edit_timestamp")
+            if last_edit:
+                info_lines.append(f"Last Edit: {last_edit}")
+        info_lines.append("")
+
+        # Data info
+        rr_data = session.get("rr_data", {})
+        if rr_data:
+            info_lines.append(f"RR Intervals: {rr_data.get('sample_count', 0)} samples")
+            info_lines.append(f"Duration: {rr_data.get('duration_s', 0):.1f} seconds")
+        else:
+            info_lines.append("RR Data: Not saved in session")
+        info_lines.append("")
+
+        # Analysis parameters
+        params = session.get("analysis_parameters", {})
+        if params:
+            info_lines.append("Analysis Parameters:")
+            for section, settings in params.items():
+                if isinstance(settings, dict):
+                    info_lines.append(f"  {section}: {len(settings)} settings")
+                else:
+                    info_lines.append(f"  {section}: {settings}")
+
+        return "\n".join(info_lines)
+
+    def _apply_session_data(
+        self, session: Dict, load_params: bool, load_data: bool, reload_file: bool
+    ):
+        """Apply loaded session data to restore application state"""
+
+        # Load analysis parameters
+        if load_params and "analysis_parameters" in session:
+            self.analysis_parameters = session["analysis_parameters"].copy()
+            self.params_widget.set_parameters(self.analysis_parameters)
+            self.statusBar().showMessage("Analysis parameters restored")
+
+        # Load data and manual edits
+        if load_data and "rr_data" in session:
+            try:
+                # Create a data bundle from session data
+                from hrvlib.data_handler import DataBundle, SourceInfo
+
+                rr_data = session["rr_data"]
+                rr_intervals = rr_data.get("rr_intervals_ms", [])
+
+                if rr_intervals:
+                    # Create source info
+                    source_path = session.get("source_file", {}).get(
+                        "path", "Session Data"
+                    )
+                    source_info = SourceInfo(
+                        path=source_path,
+                        filetype="session",
+                        device="restored_from_session",
+                        acquisition_date=session.get("session_info", {}).get(
+                            "timestamp", ""
+                        ),
+                    )
+
+                    # Create bundle
+                    bundle = DataBundle(source=source_info)
+                    bundle.rri_ms = rr_intervals
+                    bundle.meta = rr_data.get("metadata", {})
+                    bundle.meta["restored_from_session"] = True
+                    bundle.meta["session_edit_count"] = session.get(
+                        "manual_editing", {}
+                    ).get("edit_count", 0)
+
+                    # Set as current bundle
+                    self.current_bundle = bundle
+
+                    # Restore edit history
+                    self.edit_history = session.get("manual_editing", {}).get(
+                        "edit_history", []
+                    )
+                    self.has_manual_edits = session.get("manual_editing", {}).get(
+                        "has_edits", False
+                    )
+
+                    # Update displays
+                    self.meta_panel.update_meta_from_bundle(bundle)
+                    self.analyze_btn.setEnabled(True)
+
+                    # Update status
+                    edit_info = (
+                        f" with {len(self.edit_history)} manual edits"
+                        if self.has_manual_edits
+                        else ""
+                    )
+                    self.statusBar().showMessage(
+                        f"Data restored from session{edit_info}"
+                    )
+
+            except Exception as e:
+                raise Exception(f"Failed to restore data: {str(e)}")
+
+        # Reload original file if requested
+        if reload_file:
+            source_path = session.get("source_file", {}).get("path")
+            if source_path and Path(source_path).exists():
+                try:
+                    bundle = load_rr_file(source_path)
+                    self.current_bundle = bundle
+
+                    # Clear edit history since we're loading fresh file
+                    self.has_manual_edits = False
+                    self.edit_history.clear()
+
+                    self.meta_panel.update_meta_from_bundle(bundle)
+                    self.analyze_btn.setEnabled(True)
+                    self.statusBar().showMessage(
+                        f"Original file reloaded: {Path(source_path).name}"
+                    )
+
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "File Load Warning",
+                        f"Could not reload original file:\n{str(e)}\n\nUsing session data instead.",
+                    )
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "File Not Found",
+                    f"Original file not found:\n{source_path}\n\nUsing session data instead.",
+                )
 
     def undo_edit(self):
-        QtWidgets.QMessageBox.information(self, "Undo", "Undo not yet implemented")
+        self.undo_beat_edit()
 
     def reset_edits(self):
-        QtWidgets.QMessageBox.information(
-            self, "Reset", "Reset edits not yet implemented"
-        )
+        self.reset_beat_edits()
 
     def toggle_control_panel(self):
         self.control_panel.setVisible(not self.control_panel.isVisible())

@@ -646,44 +646,18 @@ class QualityAssessmentSectionWidget(MetricSectionWidget):
         self.set_content_layout(layout)
 
     def update_quality(self, quality_data):
-        """Update quality assessment display"""
+        """Update quality assessment display with proper quality determination"""
         if not quality_data:
+            self.quality_badge.setText("UNKNOWN")
+            self._set_badge_style("unknown")
             return
 
+        # Determine overall quality based on multiple factors
+        overall_quality = self._determine_overall_quality(quality_data)
+
         # Update badge
-        overall_quality = quality_data.get("overall_quality", "unknown")
         self.quality_badge.setText(overall_quality.upper())
-
-        # Color code the badge
-        if overall_quality == "good":
-            style = (
-                "background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;"
-            )
-        elif overall_quality == "fair":
-            style = (
-                "background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;"
-            )
-        elif overall_quality == "poor":
-            style = (
-                "background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;"
-            )
-        else:
-            style = (
-                "background-color: #f8f9fa; color: #6c757d; border: 1px solid #dee2e6;"
-            )
-
-        self.quality_badge.setStyleSheet(
-            f"""
-            QLabel {{
-                padding: 6px 14px;
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: 600;
-                text-transform: uppercase;
-                {style}
-            }}
-        """
-        )
+        self._set_badge_style(overall_quality)
 
         # Update metrics table
         metrics = [
@@ -721,11 +695,93 @@ class QualityAssessmentSectionWidget(MetricSectionWidget):
 
         self.table.resizeColumnsToContents()
 
-        # FIXED: Set table height
+        # Set table height
         row_height = 40
         header_height = 40
         min_height = len(available_metrics) * row_height + header_height + 20
         self.table.setMinimumHeight(min_height)
+
+    def _determine_overall_quality(self, quality_data):
+        """Determine overall quality based on multiple quality indicators (SRS compliant)"""
+
+        # Primary factor: artifact/correction percentage
+        artifact_pct = quality_data.get("artifact_percentage", 0)
+
+        # Check for manual editing data from preprocessing stats
+        if artifact_pct == 0:
+            # Try alternative keys for artifact percentage
+            artifact_pct = (
+                quality_data.get("corrected_beats_percentage", 0)
+                or quality_data.get("artifacts_corrected", 0)
+                or quality_data.get("correction_percentage", 0)
+            )
+
+        # Duration factor
+        duration_s = quality_data.get("duration_s", 0)
+
+        # Explicit quality assessment if available
+        explicit_quality = quality_data.get("overall_quality")
+        if explicit_quality and explicit_quality.lower() in [
+            "good",
+            "fair",
+            "poor",
+            "excellent",
+        ]:
+            return explicit_quality.lower()
+
+        # Signal quality factor
+        signal_quality = quality_data.get("signal_quality", "").lower()
+
+        # Determine quality based on SRS FR-14 thresholds
+        if artifact_pct > 10.0:
+            return "poor"
+        elif artifact_pct > 5.0:
+            # Additional checks for poor quality
+            if duration_s < 120 or signal_quality in ["poor", "bad", "noisy"]:
+                return "poor"
+            else:
+                return "fair"
+        elif artifact_pct > 2.0:
+            # Additional checks for fair quality
+            if duration_s < 300:  # Less than 5 minutes
+                return "fair"
+            elif signal_quality in ["good", "excellent", "clean"]:
+                return "good"
+            else:
+                return "fair"
+        else:
+            # Low artifact percentage
+            if duration_s >= 300 and signal_quality in ["good", "excellent", "clean"]:
+                return "excellent"
+            elif duration_s >= 120:
+                return "good"
+            else:
+                return "fair"  # Short duration limits quality
+
+    def _set_badge_style(self, quality_level):
+        """Set badge styling based on quality level"""
+        style_map = {
+            "excellent": "background-color: #4caf50; color: white; border: 1px solid #45a049;",
+            "good": "background-color: #8bc34a; color: white; border: 1px solid #7cb342;",
+            "fair": "background-color: #ff9800; color: white; border: 1px solid #f57c00;",
+            "poor": "background-color: #f44336; color: white; border: 1px solid #d32f2f;",
+            "unknown": "background-color: #9e9e9e; color: white; border: 1px solid #757575;",
+        }
+
+        style = style_map.get(quality_level, style_map["unknown"])
+
+        self.quality_badge.setStyleSheet(
+            f"""
+            QLabel {{
+                padding: 6px 14px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                text-transform: uppercase;
+                {style}
+            }}
+        """
+        )
 
 
 class WarningsWidget(MetricSectionWidget):
@@ -1215,169 +1271,1011 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
 
 
 class SignalViewerWidget(QtWidgets.QWidget):
-    """Interactive signal viewer with editing capabilities according to SRS requirements"""
+    """
+    Enhanced signal viewer that shows original plots AND provides editing capabilities
+    Combines the original functionality with manual beat editing (SRS FR-10 to FR-14)
+    """
 
-    beat_edited = pyqtSignal(int, str)  # beat_index, action
+    # Signals for communication with main application
+    beat_edited = pyqtSignal(str, dict)  # action, edit_info
+    quality_updated = pyqtSignal(float)  # corrected_beats_percentage
+    reanalysis_requested = pyqtSignal()  # Request reanalysis after edits
 
     def __init__(self):
         super().__init__()
-        self.bundle = None
-        self.results = None
+        self.bundle: Optional[DataBundle] = None
+        self.results: Optional[HRVAnalysisResults] = None
+        self.beat_editor: Optional["BeatEditor"] = None
+
+        # Edit state
         self.selected_beat_index = None
-        self.edit_mode = None
+        self.edit_mode = "select"
+        self.interpolation_method = None
+        self.editing_enabled = False  # Track if editing is available
+
+        # Plot mode toggle
+        self.current_plot_mode = "overview"  # "overview" or "editing"
+
         self.setup_ui()
 
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
 
-        # Editing toolbar
-        toolbar_layout = QtWidgets.QHBoxLayout()
+        # Top toolbar - combines view toggle + editing controls
+        self.create_main_toolbar(layout)
 
-        # Edit mode selection
-        self.edit_mode_group = QtWidgets.QButtonGroup()
-
-        self.select_mode_btn = QtWidgets.QRadioButton("Select")
-        self.select_mode_btn.setChecked(True)
-        self.delete_mode_btn = QtWidgets.QRadioButton("Delete")
-        self.move_mode_btn = QtWidgets.QRadioButton("Move")
-        self.interpolate_mode_btn = QtWidgets.QRadioButton("Interpolate")
-
-        self.edit_mode_group.addButton(self.select_mode_btn, 0)
-        self.edit_mode_group.addButton(self.delete_mode_btn, 1)
-        self.edit_mode_group.addButton(self.move_mode_btn, 2)
-        self.edit_mode_group.addButton(self.interpolate_mode_btn, 3)
-
-        # Action buttons
-        self.apply_edit_btn = QtWidgets.QPushButton("Apply Edit")
-        self.apply_edit_btn.setEnabled(False)
-        self.undo_btn = QtWidgets.QPushButton("Undo Last")
-        self.undo_btn.setEnabled(False)
-        self.reset_btn = QtWidgets.QPushButton("Reset All")
-
-        # Add to toolbar
-        toolbar_layout.addWidget(QtWidgets.QLabel("Mode:"))
-        toolbar_layout.addWidget(self.select_mode_btn)
-        toolbar_layout.addWidget(self.delete_mode_btn)
-        toolbar_layout.addWidget(self.move_mode_btn)
-        toolbar_layout.addWidget(self.interpolate_mode_btn)
-        toolbar_layout.addWidget(QtWidgets.QFrame())  # Separator
-        toolbar_layout.addWidget(self.apply_edit_btn)
-        toolbar_layout.addWidget(self.undo_btn)
-        toolbar_layout.addWidget(self.reset_btn)
-        toolbar_layout.addStretch()
-
-        # Matplotlib figure
-        self.figure = Figure(figsize=(12, 8))
+        # Matplotlib figure with navigation
+        self.figure = Figure(figsize=(14, 12))
         self.canvas = FigureCanvas(self.figure)
         self.navbar = NavigationToolbar(self.canvas, self)
 
-        # Status line
-        self.status_label = QtWidgets.QLabel(
-            "Click on RR intervals to select beats for editing"
-        )
-        self.status_label.setStyleSheet("color: gray; font-style: italic;")
+        # Status panel
+        self.create_status_panel(layout)
 
-        layout.addLayout(toolbar_layout)
+        # Add to layout
         layout.addWidget(self.navbar)
         layout.addWidget(self.canvas)
-        layout.addWidget(self.status_label)
 
-        # Connect signals
-        self.edit_mode_group.buttonClicked.connect(self._on_mode_changed)
-        self.apply_edit_btn.clicked.connect(self._apply_current_edit)
-        self.undo_btn.clicked.connect(self._undo_last_edit)
-        self.reset_btn.clicked.connect(self._reset_all_edits)
-
-    def update_display(self, bundle: DataBundle, results: HRVAnalysisResults):
-        """Update signal display with new data"""
-        self.bundle = bundle
-        self.results = results
-        self.selected_beat_index = None
-        self.apply_edit_btn.setEnabled(False)
-
-        self.figure.clear()
-
-        # Use enhanced plotting function
-        plot_pipeline_results(self.figure, bundle, results)
-
-        # Connect pick event for beat selection
-        self.canvas.mpl_connect("pick_event", self._on_beat_selected)
+        # Connect matplotlib events
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
-        self.canvas.draw()
 
-        self.status_label.setText(
-            "Signal loaded. Click on RR intervals to select beats for editing."
+    def create_main_toolbar(self, layout):
+        """Create main toolbar with view toggle and editing controls"""
+        main_toolbar = QtWidgets.QFrame()
+        main_toolbar.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
+        main_toolbar.setMaximumHeight(80)  # Limit toolbar height
+        toolbar_layout = QtWidgets.QHBoxLayout(main_toolbar)
+        toolbar_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
+
+        # View Mode Toggle
+        view_group = QtWidgets.QGroupBox("View Mode")
+        view_group.setMaximumHeight(60)
+        view_layout = QtWidgets.QHBoxLayout(view_group)
+        view_layout.setContentsMargins(5, 5, 5, 5)
+
+        self.view_toggle = QtWidgets.QButtonGroup()
+
+        self.overview_btn = QtWidgets.QRadioButton("Analysis Overview")
+        self.overview_btn.setChecked(True)
+        self.overview_btn.setToolTip("Show comprehensive analysis plots")
+
+        self.editing_btn = QtWidgets.QRadioButton("Beat Editing")
+        self.editing_btn.setToolTip("Interactive RR interval editing mode")
+
+        self.view_toggle.addButton(self.overview_btn, 0)
+        self.view_toggle.addButton(self.editing_btn, 1)
+
+        view_layout.addWidget(self.overview_btn)
+        view_layout.addWidget(self.editing_btn)
+
+        # Editing Controls (initially hidden)
+        self.editing_controls = self.create_editing_controls()
+        self.editing_controls.setVisible(False)
+        self.editing_controls.setMaximumHeight(60)
+
+        toolbar_layout.addWidget(view_group)
+        toolbar_layout.addWidget(self.editing_controls)
+        toolbar_layout.addStretch()
+
+        layout.addWidget(main_toolbar)
+
+        # Connect view toggle
+        self.view_toggle.buttonClicked.connect(self._on_view_mode_changed)
+
+    def create_editing_controls(self):
+        """Create editing controls widget"""
+        controls_widget = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QHBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Edit Mode Selection
+        mode_group = QtWidgets.QGroupBox("Edit Mode")
+        mode_group.setMaximumHeight(60)
+        mode_layout = QtWidgets.QHBoxLayout(mode_group)
+        mode_layout.setContentsMargins(3, 3, 3, 3)
+
+        self.mode_group = QtWidgets.QButtonGroup()
+
+        self.select_btn = QtWidgets.QRadioButton("Select")
+        self.select_btn.setChecked(True)
+        self.delete_btn = QtWidgets.QRadioButton("Delete")
+        self.move_btn = QtWidgets.QRadioButton("Move")
+        self.interpolate_btn = QtWidgets.QRadioButton("Interpolate")
+        self.insert_btn = QtWidgets.QRadioButton("Insert")
+
+        # Make buttons smaller
+        for btn in [
+            self.select_btn,
+            self.delete_btn,
+            self.move_btn,
+            self.interpolate_btn,
+            self.insert_btn,
+        ]:
+            btn.setStyleSheet("QRadioButton { font-size: 9px; }")
+
+        self.mode_group.addButton(self.select_btn, 0)
+        self.mode_group.addButton(self.delete_btn, 1)
+        self.mode_group.addButton(self.move_btn, 2)
+        self.mode_group.addButton(self.interpolate_btn, 3)
+        self.mode_group.addButton(self.insert_btn, 4)
+
+        mode_layout.addWidget(self.select_btn)
+        mode_layout.addWidget(self.delete_btn)
+        mode_layout.addWidget(self.move_btn)
+        mode_layout.addWidget(self.interpolate_btn)
+        mode_layout.addWidget(self.insert_btn)
+
+        # Interpolation Method
+        interp_group = QtWidgets.QGroupBox("Method")
+        interp_group.setMaximumHeight(60)
+        interp_layout = QtWidgets.QHBoxLayout(interp_group)
+        interp_layout.setContentsMargins(3, 3, 3, 3)
+
+        self.linear_rb = QtWidgets.QRadioButton("Linear")
+        self.cubic_rb = QtWidgets.QRadioButton("Cubic")
+        self.cubic_rb.setChecked(True)
+
+        # Make smaller
+        self.linear_rb.setStyleSheet("QRadioButton { font-size: 9px; }")
+        self.cubic_rb.setStyleSheet("QRadioButton { font-size: 9px; }")
+
+        interp_layout.addWidget(self.linear_rb)
+        interp_layout.addWidget(self.cubic_rb)
+
+        # Action Buttons
+        action_group = QtWidgets.QGroupBox("Actions")
+        action_group.setMaximumHeight(60)
+        action_layout = QtWidgets.QHBoxLayout(action_group)
+        action_layout.setContentsMargins(3, 3, 3, 3)
+
+        self.apply_btn = QtWidgets.QPushButton("Apply")
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; font-size: 9px; padding: 2px; }"
         )
 
-    def _on_mode_changed(self, button):
-        """Handle edit mode change"""
-        modes = ["select", "delete", "move", "interpolate"]
-        self.edit_mode = modes[self.edit_mode_group.id(button)]
+        self.undo_btn = QtWidgets.QPushButton("Undo")
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.setStyleSheet("QPushButton { font-size: 9px; padding: 2px; }")
 
-        if self.edit_mode == "select":
-            self.status_label.setText("Click on RR intervals to select beats")
-        else:
-            self.status_label.setText(
-                f"Click on beats to {self.edit_mode}. Click 'Apply Edit' to confirm."
-            )
+        self.reset_btn = QtWidgets.QPushButton("Reset All")
+        self.reset_btn.setStyleSheet(
+            "QPushButton { background-color: #f44336; color: white; font-size: 9px; padding: 2px; s}"
+        )
 
-    def _on_beat_selected(self, event):
-        """Handle beat selection for editing"""
-        if event.mouseevent.inaxes and hasattr(event, "ind"):
-            self.selected_beat_index = event.ind[0] if event.ind else None
-            if self.selected_beat_index is not None:
-                self.apply_edit_btn.setEnabled(self.edit_mode != "select")
-                self.status_label.setText(
-                    f"Selected beat {self.selected_beat_index}. Mode: {self.edit_mode}"
+        self.reanalyze_btn = QtWidgets.QPushButton("Reanalyze")
+        self.reanalyze_btn.setEnabled(False)
+        self.reanalyze_btn.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; font-size: 9px; padding: 2px;}"
+        )
+
+        action_layout.addWidget(self.apply_btn)
+        action_layout.addWidget(self.undo_btn)
+        action_layout.addWidget(self.reset_btn)
+        action_layout.addWidget(self.reanalyze_btn)
+
+        # Assemble controls
+        controls_layout.addWidget(mode_group)
+        controls_layout.addWidget(interp_group)
+        controls_layout.addWidget(action_group)
+
+        # Connect signals
+        self.mode_group.buttonClicked.connect(self._on_edit_mode_changed)
+        self.linear_rb.toggled.connect(self._on_interpolation_changed)
+        self.cubic_rb.toggled.connect(self._on_interpolation_changed)
+        self.apply_btn.clicked.connect(self._apply_edit)
+        self.undo_btn.clicked.connect(self._undo_edit)
+        self.reset_btn.clicked.connect(self._reset_edits)
+        self.reanalyze_btn.clicked.connect(self._request_reanalysis)
+
+        return controls_widget
+
+    def create_status_panel(self, layout):
+        """Create status panel"""
+        status_frame = QtWidgets.QFrame()
+        status_frame.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
+        status_frame.setMaximumHeight(35)  # Limit status panel height
+        status_layout = QtWidgets.QHBoxLayout(status_frame)
+        status_layout.setContentsMargins(5, 2, 5, 2)  # Smaller margins
+
+        self.status_label = QtWidgets.QLabel("Load data to begin")
+        self.status_label.setStyleSheet("font-size: 9px;")
+
+        self.stats_label = QtWidgets.QLabel("")
+        self.stats_label.setStyleSheet("font-size: 9px; font-weight: bold;")
+
+        self.quality_label = QtWidgets.QLabel("")
+        self.quality_label.setStyleSheet("font-size: 9px; font-weight: bold;")
+
+        status_layout.addWidget(QtWidgets.QLabel("Status:"))
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.stats_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.quality_label)
+
+        layout.addWidget(status_frame)
+
+    def update_display(self, bundle: DataBundle, results: HRVAnalysisResults):
+        """Update display with new data"""
+        self.bundle = bundle
+        self.results = results
+
+        # Try to initialize beat editor
+        if bundle and bundle.rri_ms:
+            try:
+                from hrvlib.beat_editor import BeatEditor, InterpolationMethod
+
+                self.beat_editor = BeatEditor(bundle.rri_ms, user_id="gui_user")
+                self.editing_enabled = True
+                self.editing_btn.setEnabled(True)
+                self.reset_btn.setEnabled(True)
+
+                # Set interpolation method
+                if self.cubic_rb.isChecked():
+                    self.interpolation_method = InterpolationMethod.CUBIC_SPLINE
+                else:
+                    self.interpolation_method = InterpolationMethod.LINEAR
+
+            except ImportError:
+                self.editing_enabled = False
+                self.editing_btn.setEnabled(False)
+                self.editing_btn.setToolTip(
+                    "Beat editing not available - beat_editor module not found"
                 )
 
-    def _on_canvas_click(self, event):
-        """Handle general canvas clicks"""
-        if event.inaxes and self.bundle and self.bundle.rri_ms:
-            # Find closest beat to click location
-            if hasattr(event, "xdata") and event.xdata is not None:
-                rri = np.array(self.bundle.rri_ms)
-                t = np.cumsum(rri) / 1000.0
+        # Update plot based on current mode
+        self._update_plot()
+        self._update_status_display()
 
-                # Find closest time point
-                closest_idx = np.argmin(np.abs(t - event.xdata))
-                self.selected_beat_index = closest_idx
+    def _on_view_mode_changed(self, button):
+        """Handle view mode toggle"""
+        if self.view_toggle.id(button) == 0:  # Overview
+            self.current_plot_mode = "overview"
+            self.editing_controls.setVisible(False)
+        else:  # Editing
+            self.current_plot_mode = "editing"
+            if self.editing_enabled:
+                self.editing_controls.setVisible(True)
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Editing Not Available",
+                    "Beat editing is not available. The beat_editor module may not be installed.",
+                )
+                self.overview_btn.setChecked(True)
+                return
 
-                if self.edit_mode != "select":
-                    self.apply_edit_btn.setEnabled(True)
-                    self.status_label.setText(
-                        f"Selected beat {closest_idx} at t={t[closest_idx]:.1f}s for {self.edit_mode}"
+        self._update_plot()
+
+    def _update_plot(self):
+        """Update plot based on current mode"""
+        if not self.bundle:
+            return
+
+        if self.current_plot_mode == "overview":
+            self._plot_overview()
+        else:
+            self._plot_editing_view()
+
+    def _plot_overview(self):
+        """Plot the comprehensive analysis overview with proper spacing and fixed band powers"""
+        if not self.bundle or not self.results:
+            return
+
+        # Create a more comprehensive overview with better spacing
+        self.figure.clear()
+
+        # Create a 3x3 grid with better spacing
+        gs = self.figure.add_gridspec(
+            3, 3, hspace=0.6, wspace=0.4, top=0.96, bottom=0.04, left=0.06, right=0.97
+        )
+
+        try:
+            # Row 1: RR intervals (spans 2 columns) + HR distribution
+            ax1 = self.figure.add_subplot(gs[0, :2])  # RR intervals - spans 2 columns
+            ax2 = self.figure.add_subplot(gs[0, 2])  # HR distribution
+
+            # Row 2: PSD (spans 2 columns) + Band powers
+            ax3 = self.figure.add_subplot(gs[1, :2])  # PSD - spans 2 columns
+            ax4 = self.figure.add_subplot(gs[1, 2])  # Band powers
+
+            # Row 3: Poincare + DFA + Quality
+            ax5 = self.figure.add_subplot(gs[2, 0])  # Poincare
+            ax6 = self.figure.add_subplot(gs[2, 1])  # DFA
+            ax7 = self.figure.add_subplot(gs[2, 2])  # Quality
+
+            # Plot 1: RR intervals over time
+            if self.bundle.rri_ms:
+                rr_data = np.array(self.bundle.rri_ms)
+                time_data = np.cumsum(rr_data) / 1000.0
+                ax1.plot(time_data, rr_data, "b-", linewidth=1.2, alpha=0.7)
+                ax1.set_xlabel("Time (s)", fontsize=8)
+                ax1.set_ylabel("RR Interval (ms)", fontsize=8)
+                ax1.set_title("RR Intervals Over Time", fontsize=9, pad=8, loc="left")
+                ax1.grid(True, alpha=0.3)
+                ax1.tick_params(labelsize=7)
+
+                # Add preprocessing info if available
+                if self.results.preprocessing_stats:
+                    corrected = self.results.preprocessing_stats.get(
+                        "artifacts_corrected", 0
+                    )
+                    if corrected > 0:
+                        ax1.text(
+                            0.02,
+                            0.98,
+                            f"Corrected: {corrected} beats",
+                            transform=ax1.transAxes,
+                            fontsize=7,
+                            verticalalignment="top",
+                            bbox=dict(
+                                boxstyle="round,pad=0.2", facecolor="yellow", alpha=0.6
+                            ),
+                        )
+
+            # Plot 2: HR Distribution
+            if self.bundle.rri_ms:
+                hr_data = 60000.0 / np.array(self.bundle.rri_ms)
+                ax2.hist(hr_data, bins=15, alpha=0.7, color="red", edgecolor="black")
+                ax2.set_xlabel("HR (bpm)", fontsize=8)
+                ax2.set_ylabel("Frequency", fontsize=8)
+                ax2.set_title("HR Distribution", fontsize=9, pad=8)
+                ax2.grid(True, alpha=0.3)
+                ax2.tick_params(labelsize=7)
+
+                # Add statistics - positioned better
+                mean_hr = np.mean(hr_data)
+                std_hr = np.std(hr_data)
+                ax2.text(
+                    0.98,
+                    0.98,
+                    f"μ: {mean_hr:.1f}\nσ: {std_hr:.1f}",
+                    transform=ax2.transAxes,
+                    fontsize=7,
+                    verticalalignment="top",
+                    horizontalalignment="right",
+                    bbox=dict(
+                        boxstyle="round,pad=0.2", facecolor="lightcoral", alpha=0.6
+                    ),
+                )
+
+            # Plot 3: Power Spectral Density
+            if (
+                self.results.frequency_domain
+                and "psd_frequencies" in self.results.frequency_domain
+                and "psd_power" in self.results.frequency_domain
+            ):
+
+                freqs = self.results.frequency_domain["psd_frequencies"]
+                power = self.results.frequency_domain["psd_power"]
+
+                if (
+                    freqs is not None
+                    and power is not None
+                    and len(freqs) > 0
+                    and len(power) > 0
+                ):
+                    ax3.semilogy(freqs, power, "b-", linewidth=1.5)
+                    ax3.axvspan(0.04, 0.15, alpha=0.2, color="green", label="LF")
+                    ax3.axvspan(0.15, 0.4, alpha=0.2, color="red", label="HF")
+                    ax3.set_xlabel("Frequency (Hz)", fontsize=8)
+                    ax3.set_ylabel("Power (ms²/Hz)", fontsize=8)
+                    ax3.set_title("Power Spectral Density", fontsize=9, pad=8)
+                    ax3.legend(fontsize=7, loc="upper right")
+                    ax3.grid(True, alpha=0.3)
+                    ax3.tick_params(labelsize=7)
+
+            # Plot 4: Band Powers - FIXED
+            if self.results.frequency_domain:
+
+                # Check for different possible key names
+                band_data = []
+                for band_key, label, color in [
+                    # Try multiple possible key variations
+                    ("VLF_power", "VLF", "purple"),
+                    ("vlf_power", "VLF", "purple"),
+                    ("LF_power", "LF", "green"),
+                    ("lf_power", "LF", "green"),
+                    ("HF_power", "HF", "red"),
+                    ("hf_power", "HF", "red"),
+                    ("total_power", "Total", "blue"),
+                ]:
+                    if band_key in self.results.frequency_domain:
+                        value = self.results.frequency_domain[band_key]
+                        if isinstance(value, (int, float)) and value > 0:
+                            band_data.append((label, value, color))
+
+                if band_data:
+                    labels, powers, colors = zip(*band_data)
+                    bars = ax4.bar(labels, powers, color=colors, alpha=0.7)
+                    ax4.set_ylabel("Power (ms²)", fontsize=8)
+                    ax4.set_title("Frequency Bands", fontsize=9, pad=8)
+                    ax4.grid(True, alpha=0.3, axis="y")
+                    ax4.tick_params(labelsize=7)
+
+                    # Add values on bars with better positioning
+                    max_power = max(powers)
+                    for bar, power in zip(bars, powers):
+                        height = bar.get_height()
+                        ax4.text(
+                            bar.get_x() + bar.get_width() / 2.0,
+                            height + max_power * 0.02,
+                            f"{power:.0f}",
+                            ha="center",
+                            va="bottom",
+                            fontsize=8,
+                        )
+                else:
+                    ax4.text(
+                        0.5,
+                        0.5,
+                        "No frequency\nband data\navailable",
+                        ha="center",
+                        va="center",
+                        transform=ax4.transAxes,
+                        fontsize=9,
+                    )
+                    ax4.set_title("Frequency Bands", fontsize=10, pad=10)
+
+            # Plot 5: Poincare Plot
+            if self.bundle.rri_ms and len(self.bundle.rri_ms) > 1:
+                rr_data = np.array(self.bundle.rri_ms)
+                x = rr_data[:-1]
+                y = rr_data[1:]
+                ax5.scatter(x, y, alpha=0.6, s=6, c="blue")
+                ax5.set_xlabel("RRₙ (ms)", fontsize=8)
+                ax5.set_ylabel("RRₙ₊₁ (ms)", fontsize=8)
+                ax5.set_title("Poincaré Plot", fontsize=9, pad=8)
+                ax5.tick_params(labelsize=7)
+
+                # Add SD1/SD2 info if available - better positioning
+                if (
+                    self.results.nonlinear
+                    and "poincare" in self.results.nonlinear
+                    and self.results.nonlinear["poincare"]
+                ):
+                    poincare = self.results.nonlinear["poincare"]
+                    sd1 = poincare.get("sd1", 0)
+                    sd2 = poincare.get("sd2", 0)
+                    ax5.text(
+                        0.02,
+                        0.02,
+                        f"SD1: {sd1:.1f}\nSD2: {sd2:.1f}",
+                        transform=ax5.transAxes,
+                        fontsize=7,
+                        verticalalignment="bottom",
+                        bbox=dict(
+                            boxstyle="round,pad=0.2", facecolor="lightblue", alpha=0.6
+                        ),
                     )
 
-    def _apply_current_edit(self):
-        """Apply the current edit operation"""
-        if self.selected_beat_index is not None and self.edit_mode:
-            self.beat_edited.emit(self.selected_beat_index, self.edit_mode)
-            self.undo_btn.setEnabled(True)
-            self.status_label.setText(
-                f"Applied {self.edit_mode} to beat {self.selected_beat_index}"
+                ax5.set_xlabel("RRₙ (ms)", fontsize=9)
+                ax5.set_ylabel("RRₙ₊₁ (ms)", fontsize=9)
+                ax5.set_title("Poincaré Plot", fontsize=10, pad=10)
+                ax5.grid(True, alpha=0.3)
+                ax5.tick_params(labelsize=8)
+
+            # Plot 6: DFA Analysis - better layout
+            if self.results.nonlinear and "dfa" in self.results.nonlinear:
+                dfa_data = self.results.nonlinear["dfa"]
+                alpha1 = dfa_data.get("alpha1")
+                alpha2 = dfa_data.get("alpha2")
+
+                # Create proper DFA visualization
+                if alpha1 is not None or alpha2 is not None:
+                    # Create scale range from 4 to 64 beats
+                    scales = np.logspace(np.log10(4), np.log10(64), 50)
+
+                    # Plot alpha1 line (short-term: 4-16 beats)
+                    if alpha1 is not None and not np.isnan(alpha1):
+                        short_scales = scales[scales <= 16]
+                        short_flucts = short_scales**alpha1 * 10  # Base scaling
+                        ax6.loglog(
+                            short_scales,
+                            short_flucts,
+                            "g-",
+                            linewidth=2,
+                            label=f"α₁={alpha1:.3f}",
+                            alpha=0.8,
+                        )
+
+                    # Plot alpha2 line (long-term: 16-64 beats)
+                    if alpha2 is not None and not np.isnan(alpha2):
+                        long_scales = scales[scales >= 16]
+                        # Connect smoothly with alpha1 line if it exists
+                        if alpha1 is not None:
+                            connection_point = (16**alpha1) * 10
+                            long_flucts = (long_scales**alpha2) * (
+                                connection_point / (16**alpha2)
+                            )
+                        else:
+                            long_flucts = long_scales**alpha2 * 20
+                        ax6.loglog(
+                            long_scales,
+                            long_flucts,
+                            "r-",
+                            linewidth=2,
+                            label=f"α₂={alpha2:.3f}",
+                            alpha=0.8,
+                        )
+
+                    ax6.set_xlabel("Window size", fontsize=8)
+                    ax6.set_ylabel("Fluctuation", fontsize=8)
+                    ax6.set_title("DFA Analysis", fontsize=9, pad=8)
+                    ax6.legend(fontsize=7, loc="lower right")
+                    ax6.grid(True, alpha=0.3)
+                    ax6.tick_params(labelsize=7)
+                else:
+                    ax6.text(
+                        0.5,
+                        0.5,
+                        "DFA data\nnot available",
+                        ha="center",
+                        va="center",
+                        transform=ax6.transAxes,
+                        fontsize=8,
+                    )
+                    ax6.set_title("DFA Analysis", fontsize=9, pad=8)
+
+            # Plot 7: Quality Assessment - improved layout
+            quality_data = self.results.quality_assessment or {}
+            preprocessing_stats = self.results.preprocessing_stats or {}
+
+            # Collect quality metrics
+            metrics_data = {}
+
+            corrected_pct = (
+                preprocessing_stats.get("corrected_beats_percentage", 0)
+                or preprocessing_stats.get("artifact_percentage", 0)
+                or quality_data.get("artifact_percentage", 0)
             )
-            self.apply_edit_btn.setEnabled(False)
+            if corrected_pct > 0:
+                metrics_data["Corrected\n(%)"] = corrected_pct
 
-    def _undo_last_edit(self):
-        """Undo the last edit operation"""
-        # This would need to be implemented with proper edit history
-        self.status_label.setText("Undo functionality not yet implemented")
+            duration = quality_data.get("duration_s")
+            if duration:
+                metrics_data["Duration\n(min)"] = duration / 60.0
 
-    def _reset_all_edits(self):
+            # Plot quality metrics
+            if metrics_data:
+                labels = list(metrics_data.keys())
+                values = list(metrics_data.values())
+
+                # Color code based on quality thresholds
+                colors = []
+                for label, value in zip(labels, values):
+                    if "Corrected" in label:
+                        if value > 5:
+                            colors.append("red")
+                        elif value > 2:
+                            colors.append("orange")
+                        else:
+                            colors.append("green")
+                    else:
+                        colors.append("blue")
+
+                bars = ax7.bar(labels, values, color=colors, alpha=0.7)
+                ax7.set_title("Quality Metrics", fontsize=10, pad=10)
+                ax7.grid(True, alpha=0.3, axis="y")
+                ax7.tick_params(labelsize=8)
+
+                # Add values on bars with better spacing
+                max_val = max(values) if values else 1
+                for bar, value in zip(bars, values):
+                    height = bar.get_height()
+                    ax7.text(
+                        bar.get_x() + bar.get_width() / 2.0,
+                        height + max_val * 0.02,
+                        f"{value:.1f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                    )
+            else:
+                ax7.text(
+                    0.5,
+                    0.5,
+                    "Quality metrics\nnot available",
+                    ha="center",
+                    va="center",
+                    transform=ax7.transAxes,
+                    fontsize=9,
+                )
+                ax7.set_title("Quality Assessment", fontsize=10, pad=10)
+
+            # Add main title with better positioning
+            self.figure.suptitle(
+                "Comprehensive HRV Analysis Overview",
+                fontsize=12,
+                fontweight="bold",
+                y=1,
+            )
+
+            self.canvas.draw()
+
+        except Exception as e:
+            # Show the full error for debugging
+            import traceback
+
+            print(f"Comprehensive plotting failed: {e}")
+            print("Full traceback:")
+            traceback.print_exc()
+
+            # Fallback to simple plot
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
+
+            if self.bundle.rri_ms:
+                rr_data = np.array(self.bundle.rri_ms)
+                time_data = np.cumsum(rr_data) / 1000.0
+                ax.plot(time_data, rr_data, "b-", linewidth=1.2, label="RR intervals")
+                ax.set_xlabel("Time (s)")
+                ax.set_ylabel("RR Interval (ms)")
+                ax.set_title("RR Intervals Over Time", fontsize=9, pad=8, loc="left")
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+
+            self.figure.tight_layout()
+            self.canvas.draw()
+
+    def _plot_editing_view(self):
+        """Plot the RR intervals for editing"""
+        if not self.beat_editor:
+            self._plot_overview()  # Fallback
+            return
+
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+
+        # Get current RR data
+        rr_data = self.beat_editor.get_current_rr_intervals()
+        time_data = np.cumsum(rr_data) / 1000.0
+
+        # Plot RR intervals with interactive markers
+        (line,) = ax.plot(
+            time_data,
+            rr_data,
+            "b-",
+            linewidth=1.2,
+            marker="o",
+            markersize=4,
+            alpha=0.8,
+            picker=True,
+            pickradius=8,
+            label="RR intervals",
+        )
+
+        # Highlight edited beats
+        if self.beat_editor.edit_history:
+            self._highlight_edits(ax, time_data, rr_data)
+
+        # Mark selected beat
+        if self.selected_beat_index is not None and self.selected_beat_index < len(
+            rr_data
+        ):
+            selected_time = time_data[self.selected_beat_index]
+            selected_rr = rr_data[self.selected_beat_index]
+            ax.plot(
+                selected_time,
+                selected_rr,
+                "ro",
+                markersize=10,
+                markeredgewidth=2,
+                markerfacecolor="none",
+                markeredgecolor="red",
+                label="Selected",
+            )
+
+        # Formatting
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("RR Interval (ms)")
+        ax.set_title(f"Interactive RR Editor - Mode: {self.edit_mode.title()}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        # Add instructions
+        mode_text = f"Mode: {self.edit_mode.title()}"
+        if self.edit_mode == "interpolate" and self.interpolation_method:
+            method = (
+                "Cubic"
+                if hasattr(self.interpolation_method, "value")
+                and self.interpolation_method.value == "cubic_spline"
+                else "Linear"
+            )
+            mode_text += f" ({method})"
+
+        ax.text(
+            0.02,
+            0.98,
+            mode_text,
+            transform=ax.transAxes,
+            fontsize=10,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="lightblue", alpha=0.8),
+        )
+
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def _highlight_edits(self, ax, time_data, rr_data):
+        """Highlight recently edited beats"""
+        if len(self.beat_editor.edit_history) > 0:
+            # Show last few edits
+            recent_edits = self.beat_editor.edit_history[-5:]
+            edit_indices = set()
+
+            for edit in recent_edits:
+                if edit.action.value != "delete":  # Skip deleted beats
+                    idx = min(edit.beat_index, len(time_data) - 1)
+                    edit_indices.add(idx)
+
+            if edit_indices:
+                edit_times = [time_data[i] for i in edit_indices if i < len(time_data)]
+                edit_rrs = [rr_data[i] for i in edit_indices if i < len(rr_data)]
+                ax.scatter(
+                    edit_times,
+                    edit_rrs,
+                    c="yellow",
+                    s=60,
+                    alpha=0.7,
+                    edgecolors="orange",
+                    linewidth=2,
+                    label="Recently Edited",
+                )
+
+    def _on_edit_mode_changed(self, button):
+        """Handle edit mode change"""
+        if not self.editing_enabled:
+            return
+
+        modes = ["select", "delete", "move", "interpolate", "insert"]
+        self.edit_mode = modes[self.mode_group.id(button)]
+
+        self.selected_beat_index = None
+        self.apply_btn.setEnabled(False)
+
+        if self.current_plot_mode == "editing":
+            self._plot_editing_view()
+
+        self._update_status(
+            "Click on RR intervals to select beats"
+            if self.edit_mode == "select"
+            else f"Click on beats to {self.edit_mode}"
+        )
+
+    def _on_interpolation_changed(self):
+        """Handle interpolation method change"""
+        if not self.editing_enabled:
+            return
+
+        try:
+            from hrvlib.beat_editor import InterpolationMethod
+
+            if self.cubic_rb.isChecked():
+                self.interpolation_method = InterpolationMethod.CUBIC_SPLINE
+            else:
+                self.interpolation_method = InterpolationMethod.LINEAR
+
+            if self.current_plot_mode == "editing":
+                self._plot_editing_view()
+        except ImportError:
+            pass
+
+    def _on_canvas_click(self, event):
+        """Handle canvas clicks for beat selection"""
+        if (
+            self.current_plot_mode != "editing"
+            or not self.beat_editor
+            or not event.inaxes
+            or self.edit_mode == "select"
+        ):
+            return
+
+        # Find closest beat
+        rr_data = self.beat_editor.get_current_rr_intervals()
+        time_data = np.cumsum(rr_data) / 1000.0
+
+        if event.xdata is not None and len(time_data) > 0:
+            distances = np.abs(time_data - event.xdata)
+            closest_idx = np.argmin(distances)
+
+            # Select if click is close enough
+            if distances[closest_idx] < (time_data[-1] - time_data[0]) * 0.02:
+                self.selected_beat_index = closest_idx
+                self.apply_btn.setEnabled(True)
+
+                self._update_status(
+                    f"Selected beat {closest_idx} at t={time_data[closest_idx]:.1f}s"
+                )
+                self._plot_editing_view()
+
+    def _apply_edit(self):
+        """Apply current edit"""
+        if not self.beat_editor or self.selected_beat_index is None:
+            return
+
+        success = False
+        edit_info = {"beat_index": self.selected_beat_index, "action": self.edit_mode}
+
+        try:
+            if self.edit_mode == "delete":
+                success = self.beat_editor.delete_beat(self.selected_beat_index)
+            elif self.edit_mode == "move":
+                target_index, ok = QtWidgets.QInputDialog.getInt(
+                    self,
+                    "Move Beat",
+                    f"Move beat from index {self.selected_beat_index} to index:",
+                    self.selected_beat_index,
+                    0,
+                    len(self.beat_editor.get_current_rr_intervals()) - 1,
+                )
+                if ok:
+                    success = self.beat_editor.move_beat(
+                        self.selected_beat_index, target_index
+                    )
+                    edit_info["target_index"] = target_index
+            elif self.edit_mode == "interpolate":
+                success = self.beat_editor.interpolate_beat(
+                    self.selected_beat_index, self.interpolation_method
+                )
+                edit_info["interpolation_method"] = (
+                    self.interpolation_method.value
+                    if self.interpolation_method
+                    else "linear"
+                )
+            elif self.edit_mode == "insert":
+                success = self.beat_editor.insert_beat(
+                    self.selected_beat_index, self.interpolation_method
+                )
+                edit_info["interpolation_method"] = (
+                    self.interpolation_method.value
+                    if self.interpolation_method
+                    else "linear"
+                )
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Edit Error", f"Failed to {self.edit_mode}:\n{str(e)}"
+            )
+            return
+
+        if success:
+            self.selected_beat_index = None
+            self.apply_btn.setEnabled(False)
+            self.undo_btn.setEnabled(True)
+            self.reanalyze_btn.setEnabled(True)
+
+            self._plot_editing_view()
+            self._update_status_display()
+
+            # Emit signals
+            self.beat_edited.emit(self.edit_mode, edit_info)
+
+            # Check quality threshold
+            corrected_pct = self.beat_editor.get_corrected_beats_percentage()
+            self.quality_updated.emit(corrected_pct)
+
+            if corrected_pct > 5.0:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Quality Warning",
+                    f"Corrected beats: {corrected_pct:.1f}% exceeds 5% threshold.\n"
+                    "Consider using different data or reviewing signal quality.",
+                )
+
+    def _undo_edit(self):
+        """Undo last edit"""
+        if not self.beat_editor:
+            return
+
+        if self.beat_editor.undo_last_edit():
+            self.selected_beat_index = None
+            self.apply_btn.setEnabled(False)
+
+            if not self.beat_editor.edit_history:
+                self.undo_btn.setEnabled(False)
+                self.reanalyze_btn.setEnabled(False)
+
+            self._plot_editing_view()
+            self._update_status_display()
+            self.beat_edited.emit("undo", {})
+        else:
+            self._update_status("No edits to undo")
+
+    def _reset_edits(self):
         """Reset all edits"""
+        if not self.beat_editor or not self.beat_editor.edit_history:
+            return
+
         reply = QtWidgets.QMessageBox.question(
             self,
             "Reset All Edits",
-            "Are you sure you want to reset all manual edits?",
+            f"Reset all {len(self.beat_editor.edit_history)} edits?",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
         )
 
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            self.status_label.setText(
-                "All edits reset (functionality not yet implemented)"
+            self.beat_editor.reset_all_edits()
+            self.selected_beat_index = None
+            self.apply_btn.setEnabled(False)
+            self.undo_btn.setEnabled(False)
+            self.reanalyze_btn.setEnabled(False)
+
+            self._plot_editing_view()
+            self._update_status_display()
+            self.beat_edited.emit("reset", {})
+
+    def _request_reanalysis(self):
+        """Request reanalysis"""
+        if self.beat_editor and self.beat_editor.edit_history:
+            edited_rr = self.beat_editor.get_current_rr_intervals()
+            if self.bundle:
+                self.bundle.rri_ms = edited_rr.tolist()
+            self.reanalysis_requested.emit()
+
+    def _update_status(self, message: str):
+        """Update status label"""
+        self.status_label.setText(message)
+
+    def _update_status_display(self):
+        """Update all status displays"""
+        if self.editing_enabled and self.beat_editor:
+            stats = self.beat_editor.get_edit_statistics()
+
+            # Update statistics
+            if stats["total_edits"] > 0:
+                stats_text = (
+                    f"Edits: {stats['total_edits']} "
+                    f"(Del: {stats['deleted_beats']}, Int: {stats['interpolated_beats']})"
+                )
+                self.stats_label.setText(stats_text)
+            else:
+                self.stats_label.setText("")
+
+            # Update quality
+            corrected_pct = stats["corrected_beats_percentage"]
+            if corrected_pct > 5.0:
+                color, text = "#f44336", f"Quality: POOR ({corrected_pct:.1f}%)"
+            elif corrected_pct > 2.0:
+                color, text = "#ff9800", f"Quality: FAIR ({corrected_pct:.1f}%)"
+            elif corrected_pct > 0:
+                color, text = "#4caf50", f"Quality: GOOD ({corrected_pct:.1f}%)"
+            else:
+                color, text = "", ""
+
+            self.quality_label.setText(text)
+            self.quality_label.setStyleSheet(
+                f"color: {color}; font-weight: bold;" if color else ""
             )
+        else:
+            if self.current_plot_mode == "overview":
+                self._update_status("Showing analysis overview")
+            else:
+                self._update_status("Beat editing not available")
+
+    # Interface methods for compatibility
+    def get_audit_trail(self) -> Dict[str, Any]:
+        """Get audit trail for export"""
+        if self.beat_editor:
+            return {
+                "audit_trail": self.beat_editor.get_audit_trail(),
+                "edit_statistics": self.beat_editor.get_edit_statistics(),
+                "original_rr_count": len(self.beat_editor.get_original_rr_intervals()),
+                "current_rr_count": len(self.beat_editor.get_current_rr_intervals()),
+            }
+        return {}
+
+    def get_edited_rr_intervals(self) -> Optional[np.ndarray]:
+        """Get edited RR intervals"""
+        if self.beat_editor:
+            return self.beat_editor.get_current_rr_intervals()
+        return None
+
+    def has_edits(self) -> bool:
+        """Check if edits were made"""
+        return self.beat_editor is not None and len(self.beat_editor.edit_history) > 0
 
 
 class ExportDialog(QtWidgets.QDialog):
@@ -1776,7 +2674,7 @@ class HelpDialog(QtWidgets.QDialog):
 
 
 class SessionManager:
-    """Utility class for managing session save/load functionality"""
+    """Enhanced session manager for SRS compliance with manual editing support"""
 
     @staticmethod
     def save_session(
@@ -1785,22 +2683,76 @@ class SessionManager:
         edit_history: list,
         file_info: str,
         results: Optional[HRVAnalysisResults] = None,
+        bundle: Optional[DataBundle] = None,
+        signal_viewer_data: Optional[Dict] = None,
     ) -> bool:
-        """Save current session to JSON file"""
+        """
+        Save comprehensive session including manual edits (SRS compliant)
+
+        Args:
+            file_path: Path to save session file
+            analysis_parameters: Analysis configuration
+            edit_history: List of manual edits performed
+            file_info: Source file information
+            results: Analysis results (optional)
+            bundle: Data bundle with current state (optional)
+            signal_viewer_data: Editing state from signal viewer (optional)
+        """
         try:
+            # Core session data
             session_data = {
-                "version": "2.1.1",
-                "timestamp": datetime.now().isoformat(),
-                "file_info": file_info,
+                "session_info": {
+                    "version": "2.1.1",
+                    "timestamp": datetime.now().isoformat(),
+                    "srs_compliance": "Manual editing with audit trail (FR-10 to FR-14)",
+                },
+                "source_file": {
+                    "path": file_info,
+                    "loaded_timestamp": datetime.now().isoformat(),
+                },
                 "analysis_parameters": analysis_parameters,
-                "edit_history": edit_history,
-                "results_summary": (
-                    SessionManager._serialize_results(results) if results else None
-                ),
+                "manual_editing": {
+                    "has_edits": len(edit_history) > 0,
+                    "edit_count": len(
+                        [
+                            e
+                            for e in edit_history
+                            if e.get("action") not in ["undo", "reset"]
+                        ]
+                    ),
+                    "edit_history": edit_history,
+                    "last_edit_timestamp": (
+                        edit_history[-1].get("timestamp") if edit_history else None
+                    ),
+                },
             }
 
-            with open(file_path, "w") as f:
+            # Add current RR intervals if bundle available (including edits)
+            if bundle and bundle.rri_ms:
+                session_data["rr_data"] = {
+                    "rr_intervals_ms": bundle.rri_ms,
+                    "sample_count": len(bundle.rri_ms),
+                    "duration_s": sum(bundle.rri_ms) / 1000.0 if bundle.rri_ms else 0,
+                }
+
+                # Include original metadata
+                if hasattr(bundle, "meta") and bundle.meta:
+                    session_data["rr_data"]["metadata"] = bundle.meta.copy()
+
+            # Add detailed audit trail from signal viewer
+            if signal_viewer_data:
+                session_data["detailed_audit_trail"] = signal_viewer_data
+
+            # Add analysis results summary (not full results to keep file size manageable)
+            if results:
+                session_data["results_summary"] = (
+                    SessionManager._serialize_results_summary(results)
+                )
+
+            # Save to file
+            with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, indent=2, default=str)
+
             return True
 
         except Exception as e:
@@ -1809,10 +2761,16 @@ class SessionManager:
 
     @staticmethod
     def load_session(file_path: str) -> Optional[Dict[str, Any]]:
-        """Load session from JSON file"""
+        """Load session with validation"""
         try:
-            with open(file_path, "r") as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 session_data = json.load(f)
+
+            # Validate session format
+            if not SessionManager._validate_session(session_data):
+                print("Invalid session format")
+                return None
+
             return session_data
 
         except Exception as e:
@@ -1820,21 +2778,34 @@ class SessionManager:
             return None
 
     @staticmethod
-    def _serialize_results(results: HRVAnalysisResults) -> Dict[str, Any]:
-        """Convert results to serializable format"""
-        serialized = {}
+    def _validate_session(session_data: Dict) -> bool:
+        """Validate session data structure"""
+        required_keys = ["session_info", "analysis_parameters"]
+        return all(key in session_data for key in required_keys)
 
+    @staticmethod
+    def _serialize_results_summary(results: HRVAnalysisResults) -> Dict[str, Any]:
+        """Create compact summary of results for session storage"""
+        summary = {
+            "computed_domains": {
+                "time_domain": results.time_domain is not None,
+                "frequency_domain": results.frequency_domain is not None,
+                "nonlinear": results.nonlinear is not None,
+            },
+            "warnings_count": len(results.warnings) if results.warnings else 0,
+            "quality_summary": (
+                results.quality_assessment.get("overall_quality")
+                if results.quality_assessment
+                else "unknown"
+            ),
+        }
+
+        # Add key metrics for validation
         if results.time_domain:
-            serialized["time_domain"] = dict(results.time_domain)
-        if results.frequency_domain:
-            serialized["frequency_domain"] = dict(results.frequency_domain)
-        if results.nonlinear:
-            serialized["nonlinear"] = dict(results.nonlinear)
-        if results.respiratory:
-            serialized["respiratory"] = dict(results.respiratory)
-        if results.quality_assessment:
-            serialized["quality_assessment"] = dict(results.quality_assessment)
-        if results.preprocessing_stats:
-            serialized["preprocessing_stats"] = dict(results.preprocessing_stats)
+            summary["key_metrics"] = {
+                "sdnn": results.time_domain.get("sdnn"),
+                "rmssd": results.time_domain.get("rmssd"),
+                "mean_rr": results.time_domain.get("mean_rr"),
+            }
 
-        return serialized
+        return summary

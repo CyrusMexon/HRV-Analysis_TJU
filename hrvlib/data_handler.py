@@ -3,7 +3,7 @@ import json
 import math
 import warnings
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 import sys
 
 import numpy as np
@@ -135,6 +135,26 @@ class DataBundle:
             "source": self.source.__dict__ if self.source else None,
             "meta_keys": list(self.meta.keys()),
         }
+
+    def update_rr_intervals(
+        self, new_rr_ms: List[float], edit_info: Dict[str, Any] = None
+    ):
+        """
+        Update RR intervals with edited data
+
+        Args:
+            new_rr_ms: New RR interval data in milliseconds
+            edit_info: Information about the editing process
+        """
+        self.rri_ms = new_rr_ms
+
+        # Update metadata with editing information
+        if edit_info:
+            if "editing" not in self.meta:
+                self.meta["editing"] = {}
+
+            self.meta["editing"].update(edit_info)
+            self.meta["editing"]["last_modified"] = datetime.now().isoformat()
 
 
 # =========================
