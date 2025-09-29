@@ -1759,31 +1759,96 @@ class SignalViewerWidget(QtWidgets.QWidget):
             # Plot 6: DFA Analysis - better layout
             if self.results.nonlinear and "dfa" in self.results.nonlinear:
                 dfa_data = self.results.nonlinear["dfa"]
+
+                # Get raw DFA data first
+                box_sizes = dfa_data.get("box_sizes")
+                fluctuations = dfa_data.get("fluctuations")
                 alpha1 = dfa_data.get("alpha1")
                 alpha2 = dfa_data.get("alpha2")
 
-                # Create proper DFA visualization
-                if alpha1 is not None or alpha2 is not None:
-                    # Create scale range from 4 to 64 beats
-                    scales = np.logspace(np.log10(4), np.log10(64), 50)
+                plotted_raw_data = False
 
-                    # Plot alpha1 line (short-term: 4-16 beats)
-                    if alpha1 is not None and not np.isnan(alpha1):
-                        short_scales = scales[scales <= 16]
-                        short_flucts = short_scales**alpha1 * 10  # Base scaling
+                # Plot the actual DFA curve (blue points) if available
+                if (
+                    box_sizes is not None
+                    and fluctuations is not None
+                    and len(box_sizes) == len(fluctuations)
+                    and len(box_sizes) > 0
+                ):
+
+                    # Convert to numpy arrays and filter valid data
+                    box_sizes = np.array(box_sizes)
+                    fluctuations = np.array(fluctuations)
+
+                    valid_mask = (
+                        (box_sizes > 0)
+                        & (fluctuations > 0)
+                        & np.isfinite(box_sizes)
+                        & np.isfinite(fluctuations)
+                    )
+
+                    if np.any(valid_mask):
+                        valid_boxes = box_sizes[valid_mask]
+                        valid_flucts = fluctuations[valid_mask]
+
+                        # Plot the blue curve (same as PDF)
                         ax6.loglog(
-                            short_scales,
-                            short_flucts,
-                            "g-",
-                            linewidth=2,
-                            label=f"α₁={alpha1:.3f}",
-                            alpha=0.8,
+                            valid_boxes,
+                            valid_flucts,
+                            "bo-",
+                            markersize=3,
+                            linewidth=1,
+                            alpha=0.7,
+                            label="DFA curve",
                         )
+                        plotted_raw_data = True
 
-                    # Plot alpha2 line (long-term: 16-64 beats)
-                    if alpha2 is not None and not np.isnan(alpha2):
-                        long_scales = scales[scales >= 16]
-                        # Connect smoothly with alpha1 line if it exists
+                # Add scaling exponent lines (same as before but conditional)
+                if alpha1 is not None and not np.isnan(alpha1):
+                    short_scales = np.logspace(np.log10(4), np.log10(16), 20)
+                    if plotted_raw_data:
+                        # If we have raw data, fit the line to it
+                        short_mask = (valid_boxes >= 4) & (valid_boxes <= 16)
+                        if np.any(short_mask):
+                            # Use actual data range for scaling
+                            short_flucts = short_scales**alpha1
+                            # Scale to match data
+                            if len(valid_flucts[short_mask]) > 0:
+                                scale_factor = np.mean(
+                                    valid_flucts[short_mask]
+                                ) / np.mean(short_flucts)
+                                short_flucts *= scale_factor
+                        else:
+                            short_flucts = short_scales**alpha1 * 10
+                    else:
+                        short_flucts = short_scales**alpha1 * 10
+
+                    ax6.loglog(
+                        short_scales,
+                        short_flucts,
+                        "g-",
+                        linewidth=2,
+                        label=f"α₁={alpha1:.3f}",
+                        alpha=0.8,
+                    )
+
+                if alpha2 is not None and not np.isnan(alpha2):
+                    long_scales = np.logspace(np.log10(16), np.log10(64), 20)
+                    if plotted_raw_data:
+                        # Connect with actual data
+                        long_mask = valid_boxes >= 16
+                        if np.any(long_mask):
+                            long_flucts = long_scales**alpha2
+                            # Scale to match data
+                            if len(valid_flucts[long_mask]) > 0:
+                                scale_factor = np.mean(
+                                    valid_flucts[long_mask]
+                                ) / np.mean(long_flucts)
+                                long_flucts *= scale_factor
+                        else:
+                            long_flucts = long_scales**alpha2 * 20
+                    else:
+                        # No raw data, create synthetic
                         if alpha1 is not None:
                             connection_point = (16**alpha1) * 10
                             long_flucts = (long_scales**alpha2) * (
@@ -1791,32 +1856,45 @@ class SignalViewerWidget(QtWidgets.QWidget):
                             )
                         else:
                             long_flucts = long_scales**alpha2 * 20
-                        ax6.loglog(
-                            long_scales,
-                            long_flucts,
-                            "r-",
-                            linewidth=2,
-                            label=f"α₂={alpha2:.3f}",
-                            alpha=0.8,
-                        )
 
-                    ax6.set_xlabel("Window size", fontsize=8)
-                    ax6.set_ylabel("Fluctuation", fontsize=8)
-                    ax6.set_title("DFA Analysis", fontsize=9, pad=8)
-                    ax6.legend(fontsize=7, loc="lower right")
-                    ax6.grid(True, alpha=0.3)
-                    ax6.tick_params(labelsize=7)
-                else:
-                    ax6.text(
-                        0.5,
-                        0.5,
-                        "DFA data\nnot available",
-                        ha="center",
-                        va="center",
-                        transform=ax6.transAxes,
-                        fontsize=8,
+                    ax6.loglog(
+                        long_scales,
+                        long_flucts,
+                        "r-",
+                        linewidth=2,
+                        label=f"α₂={alpha2:.3f}",
+                        alpha=0.8,
                     )
-                    ax6.set_title("DFA Analysis", fontsize=9, pad=8)
+
+                # Set labels and formatting
+                ax6.set_xlabel("Window size", fontsize=8)
+                ax6.set_ylabel("Fluctuation", fontsize=8)
+                ax6.set_title("DFA Analysis", fontsize=9, pad=8)
+                if plotted_raw_data or alpha1 is not None or alpha2 is not None:
+                    ax6.legend(fontsize=7, loc="lower right")
+                ax6.grid(True, alpha=0.3)
+                ax6.tick_params(labelsize=7)
+
+                # Debug print to see what data is available
+                print(f"DFA Debug - box_sizes available: {box_sizes is not None}")
+                print(f"DFA Debug - fluctuations available: {fluctuations is not None}")
+                if box_sizes is not None:
+                    print(f"DFA Debug - box_sizes length: {len(box_sizes)}")
+                    print(
+                        f"DFA Debug - fluctuations length: {len(fluctuations) if fluctuations is not None else 'None'}"
+                    )
+
+            else:
+                ax6.text(
+                    0.5,
+                    0.5,
+                    "DFA data\nnot available",
+                    ha="center",
+                    va="center",
+                    transform=ax6.transAxes,
+                    fontsize=8,
+                )
+                ax6.set_title("DFA Analysis", fontsize=9, pad=8)
 
             # Plot 7: Quality Assessment - improved layout
             quality_data = self.results.quality_assessment or {}

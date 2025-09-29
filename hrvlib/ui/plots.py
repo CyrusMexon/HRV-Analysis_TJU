@@ -371,18 +371,50 @@ def create_summary_figure(
     ax4 = fig.add_subplot(gs[1, 2])
     if results.frequency_domain:
         labels, powers, colors = [], [], []
-        for band, color in [
-            ("LF_power", "green"),
-            ("HF_power", "red"),
-            ("VLF_power", "purple"),
-        ]:
-            if band in results.frequency_domain:
-                labels.append(band.replace("_power", ""))
-                powers.append(results.frequency_domain[band])
-                colors.append(color)
+
+        # Try multiple key variations to match what the app uses
+        band_mapping = [
+            (["VLF_power", "vlf_power"], "VLF", "purple"),
+            (["LF_power", "lf_power"], "LF", "green"),
+            (["HF_power", "hf_power"], "HF", "red"),
+        ]
+
+        for key_variants, label, color in band_mapping:
+            for key in key_variants:
+                if key in results.frequency_domain:
+                    value = results.frequency_domain[key]
+                    if isinstance(value, (int, float)) and value > 0:
+                        labels.append(label)
+                        powers.append(value)
+                        colors.append(color)
+                        break  # Found the key, don't check other variants
+
         if powers:
-            ax4.bar(labels, powers, color=colors, alpha=0.7)
-            ax4.set_ylabel("Power (ms²)")
+            bars = ax4.bar(labels, powers, color=colors, alpha=0.7)
+            ax4.set_ylabel("Power (msÂ²)")
+            ax4.set_title("Band Powers")
+
+            # Add value labels on bars (same as app)
+            for bar, power in zip(bars, powers):
+                height = bar.get_height()
+                ax4.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height + max(powers) * 0.01,
+                    f"{power:.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        else:
+            # Show message if no data
+            ax4.text(
+                0.5,
+                0.5,
+                "No frequency\nband data\navailable",
+                ha="center",
+                va="center",
+                transform=ax4.transAxes,
+            )
             ax4.set_title("Band Powers")
 
     # Nonlinear analysis
