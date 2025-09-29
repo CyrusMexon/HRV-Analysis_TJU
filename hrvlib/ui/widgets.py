@@ -1145,31 +1145,17 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
         layout.addStretch()
 
     def update_quality_assessment(self, results: HRVAnalysisResults):
-        """Update quality assessment display with results"""
+        """Update quality assessment display with results - PIPELINE AWARE"""
         if not results:
             self._reset_display()
             return
 
-        # Extract quality info from preprocessing stats first
+        # Extract data from your pipeline's structure
         preprocessing_stats = results.preprocessing_stats or {}
         quality_assessment = results.quality_assessment or {}
 
-        # Get corrected beats percentage from preprocessing stats
-        corrected_pct = 0.0
-        if preprocessing_stats:
-            # Try different possible keys for artifact percentage
-            corrected_pct = (
-                preprocessing_stats.get("corrected_beats_percentage", 0)
-                or preprocessing_stats.get("artifact_percentage", 0)
-                or preprocessing_stats.get("artifacts_corrected", 0)
-            )
-
-        # Also check quality assessment
-        if quality_assessment and corrected_pct == 0:
-            corrected_pct = quality_assessment.get(
-                "corrected_beats_percentage", 0
-            ) or quality_assessment.get("artifact_percentage", 0)
-
+        # 1. CORRECTED BEATS PERCENTAGE - from preprocessing_stats
+        corrected_pct = preprocessing_stats.get("artifact_percentage", 0.0)
         self.corrected_beats_label.setText(f"{corrected_pct:.1f}%")
 
         # Color code based on SRS threshold (5%)
@@ -1188,48 +1174,92 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
             self.status_indicator.setText("● Good Quality")
             self.status_indicator.setStyleSheet("color: green; font-weight: bold;")
 
-        # Update other quality metrics
-        signal_quality = quality_assessment.get("signal_quality", "Unknown")
+        # 2. SIGNAL QUALITY - from quality_assessment.overall_quality
+        signal_quality = quality_assessment.get("overall_quality", "Unknown").title()
         self.signal_quality_label.setText(signal_quality)
 
-        rhythm_type = quality_assessment.get("rhythm_type", "Unknown")
+        # 3. RHYTHM TYPE - derive from quality flags and warnings
+        rhythm_type = "Normal Sinus"  # Default assumption
+
+        # Check quality flags from preprocessing
+        quality_flags = preprocessing_stats.get("quality_flags", {})
+        if quality_flags.get("excessive_artifacts", False):
+            rhythm_type = "Ectopic Present"
+        elif quality_flags.get("poor_signal_quality", False):
+            rhythm_type = "Poor Signal"
+
+        # Check warnings for rhythm information
+        warnings = results.warnings or []
+        warning_text = " ".join(warnings).lower()
+        if any(
+            term in warning_text for term in ["atrial fibrillation", "af", "irregular"]
+        ):
+            rhythm_type = "Irregular"
+        elif any(term in warning_text for term in ["arrhythmia", "ectopic"]):
+            rhythm_type = "Ectopic Present"
+
         self.rhythm_type_label.setText(rhythm_type)
 
-        artifact_density = quality_assessment.get("artifact_density", 0)
-        self.artifact_density_label.setText(f"{artifact_density:.1f}%")
+        # 4. ARTIFACT DENSITY - calculate from your pipeline data
+        artifact_density = 0.0
 
-        # Update warnings from multiple sources
+        artifacts_detected = preprocessing_stats.get("artifacts_detected", 0)
+        duration_s = quality_assessment.get("duration_s", 0)
+
+        if duration_s > 0 and artifacts_detected > 0:
+            # Artifacts per minute
+            artifact_density = (artifacts_detected / duration_s) * 60.0
+
+        self.artifact_density_label.setText(f"{artifact_density:.1f}/min")
+
+        # 5. UPDATE WARNINGS - from multiple sources in your pipeline
         self.warnings_list.clear()
         warnings = []
 
-        # Get warnings from results
-        if hasattr(results, "warnings") and results.warnings:
+        # Get warnings from results.warnings
+        if results.warnings:
             warnings.extend(results.warnings)
 
-        # Get warnings from quality assessment
-        if quality_assessment.get("warnings"):
-            warnings.extend(quality_assessment["warnings"])
-
-        # Get recommendations as warnings
+        # Get recommendations from quality_assessment
         if quality_assessment.get("recommendations"):
             warnings.extend(quality_assessment["recommendations"])
 
-        # Add automatic warning for high correction percentage (SRS requirement)
+        # Add SRS-compliant warnings based on your data
         if corrected_pct > 5.0:
             warnings.insert(
                 0,
-                f"High correction rate ({corrected_pct:.1f}%) exceeds recommended 5% threshold",
+                f"High correction rate ({corrected_pct:.1f}%) exceeds recommended 5% threshold (SRS FR-14)",
+            )
+        elif corrected_pct > 2.0:
+            warnings.insert(
+                0,
+                f"Moderate correction rate ({corrected_pct:.1f}%) - monitor data quality",
             )
 
-        for warning in warnings:
+        # Add duration warnings
+        if duration_s < 120:
+            warnings.append(
+                "Recording duration < 2 minutes may limit metric reliability"
+            )
+        elif duration_s < 300:
+            warnings.append(
+                "Consider longer recordings (≥5 minutes) for more stable metrics"
+            )
+
+        # Add respiratory warnings if available
+        if results.respiratory:
+            resp_warnings = results.respiratory.get("warnings", [])
+            warnings.extend([f"Respiratory: {w}" for w in resp_warnings])
+
+        # Display warnings with appropriate icons and colors
+        for warning in warnings[:8]:  # Limit to prevent overflow
             item = QtWidgets.QListWidgetItem(str(warning))
 
-            # Color code warnings based on severity
-            warning_str = str(warning).lower()
-            if (
-                "threshold exceeded" in warning_str
-                or "high" in warning_str
-                or "poor" in warning_str
+            # Color code warnings
+            warning_lower = str(warning).lower()
+            if any(
+                term in warning_lower
+                for term in ["threshold exceeded", "high", "poor", "exceeds"]
             ):
                 item.setBackground(QtGui.QColor(255, 200, 200))  # Light red
                 item.setIcon(
@@ -1237,10 +1267,9 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
                         QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical
                     )
                 )
-            elif (
-                "overlap" in warning_str
-                or "respiration" in warning_str
-                or "consider" in warning_str
+            elif any(
+                term in warning_lower
+                for term in ["moderate", "monitor", "consider", "may limit"]
             ):
                 item.setBackground(QtGui.QColor(255, 255, 200))  # Light yellow
                 item.setIcon(
