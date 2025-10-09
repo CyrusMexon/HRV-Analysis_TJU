@@ -470,19 +470,44 @@ def _load_edf(path: str) -> DataBundle:
     fs_list = [f.getSampleFrequency(i) for i in range(n)]
 
     bundle = DataBundle(meta={"format": "edf", "edf_header": f.getHeader()})
+
+    # Track sampling rates to set a global fs
+    detected_fs = []
+
     # Channel loop
     for i in range(n):
         sig = f.readSignal(i)
         label = labels[i] if i < len(labels) else f"ch{i}"
         kind = _label_to_kind(label)
         if kind in ("ECG", "PPG", "RESP"):
+            fs = float(fs_list[i])
             ts = TimeSeries(
                 name=kind,
                 data=np.asarray(sig, dtype=float),
-                fs=float(fs_list[i]),
+                fs=fs,
                 units=None,
             )
             getattr(bundle, kind.lower()).append(ts)
+            detected_fs.append(fs)
+
+    # Set global fs in metadata
+    # Use the most common sampling rate, or the first one if all are different
+    if detected_fs:
+        # Find most common fs
+        unique_fs = list(set(detected_fs))
+        if len(unique_fs) == 1:
+            # All channels have same fs
+            bundle.meta["fs"] = unique_fs[0]
+        else:
+            # Multiple different sampling rates - use the most common one
+            # or the highest one (typically ECG has highest fs)
+            fs_counts = {fs: detected_fs.count(fs) for fs in unique_fs}
+            most_common_fs = max(fs_counts, key=fs_counts.get)
+            bundle.meta["fs"] = most_common_fs
+            warnings.warn(
+                f"EDF file contains multiple sampling rates: {unique_fs}. "
+                f"Using {most_common_fs} Hz as the primary sampling rate."
+            )
 
     # Some EDF may have RR annotations; pyedflib does not always expose them.
     # If you standardize RR export via separate channel label, add it here.
