@@ -313,6 +313,25 @@ def load_rr_file(
             path=path, filetype=ext, device=bundle.meta.get("device")
         )
 
+    # --- Optional: trim very long waveforms for faster HRV analysis ---
+    MAX_DURATION_SEC = 300  # 5 minutes
+    if any([bundle.ecg, bundle.ppg]):
+        # If ECG or PPG signal exists and sampling rate known
+        fs = bundle.meta.get("fs", None)
+        if fs and fs > 0:
+            max_samples = int(MAX_DURATION_SEC * fs)
+            for series_list in [bundle.ecg, bundle.ppg, bundle.resp]:
+                for ts in series_list:
+                    if len(ts.data) > max_samples:
+                        ts.data = ts.data[:max_samples]
+                        ts.start_time = 0.0
+                        bundle.meta["trimmed"] = (
+                            f"Trimmed to {MAX_DURATION_SEC}s ({max_samples} samples)"
+                        )
+                        print(
+                            f"⚠️  Trimmed {ts.name} to {MAX_DURATION_SEC}s for faster analysis."
+                        )
+
     # Derive RRI/PPI from ECG/PPG if missing (Pan–Tompkins etc.)
     bundle = _extract_intervals_from_waveforms(bundle)
 
@@ -469,6 +488,11 @@ def _load_edf(path: str) -> DataBundle:
     labels = f.getSignalLabels()
     fs_list = [f.getSampleFrequency(i) for i in range(n)]
 
+    print(f"\n=== Loading EDF file: {path} ===")
+    print(f"Number of channels: {n}")
+    print(f"Channel labels: {labels}")
+    print(f"Sampling rates: {fs_list}")
+
     bundle = DataBundle(meta={"format": "edf", "edf_header": f.getHeader()})
 
     # Track sampling rates to set a global fs
@@ -479,6 +503,12 @@ def _load_edf(path: str) -> DataBundle:
         sig = f.readSignal(i)
         label = labels[i] if i < len(labels) else f"ch{i}"
         kind = _label_to_kind(label)
+
+        print(f"\nChannel {i}: '{label}'")
+        print(f"  - Mapped to: {kind if kind else 'UNKNOWN/IGNORED'}")
+        print(f"  - Samples: {len(sig)}, fs: {fs_list[i]} Hz")
+        print(f"  - Value range: [{np.min(sig):.3f}, {np.max(sig):.3f}]")
+
         if kind in ("ECG", "PPG", "RESP"):
             fs = float(fs_list[i])
             ts = TimeSeries(
@@ -508,6 +538,13 @@ def _load_edf(path: str) -> DataBundle:
                 f"EDF file contains multiple sampling rates: {unique_fs}. "
                 f"Using {most_common_fs} Hz as the primary sampling rate."
             )
+
+    print(f"\n=== EDF Loading Summary ===")
+    print(f"ECG channels loaded: {len(bundle.ecg)}")
+    print(f"PPG channels loaded: {len(bundle.ppg)}")
+    print(f"RESP channels loaded: {len(bundle.resp)}")
+    print(f"Global fs: {bundle.meta.get('fs', 'NOT SET')}")
+    print(f"===========================\n")
 
     # Some EDF may have RR annotations; pyedflib does not always expose them.
     # If you standardize RR export via separate channel label, add it here.

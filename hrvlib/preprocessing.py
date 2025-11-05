@@ -323,7 +323,7 @@ def preprocess_rri(
     Complete preprocessing pipeline for RR intervals with proper extra beat handling and noise detection.
 
     Args:
-        rri_ms: RR intervals in milliseconds
+        rri_ms: RR intervals (should be in milliseconds, but will auto-detect and convert if in seconds)
         threshold_low: Lower threshold for valid RR intervals
         threshold_high: Upper threshold for valid RR intervals
         ectopic_threshold: Relative threshold for ectopic detection
@@ -347,6 +347,33 @@ def preprocess_rri(
 
     if len(rri_array) == 0:
         raise ValueError("No valid RR intervals after removing NaN/inf values")
+
+    # CRITICAL: Auto-detect units (seconds vs milliseconds)
+    # Normal RR intervals: 300-2000 ms (0.3-2.0 seconds)
+    # If mean is < 10, likely in seconds; if > 100, likely in milliseconds
+    mean_value = np.mean(rri_array)
+
+    if mean_value < 10:  # Likely in seconds (typical: 0.6-1.2 seconds)
+        warnings.warn(
+            f"RR intervals appear to be in seconds (mean={mean_value:.3f}s), "
+            f"converting to milliseconds"
+        )
+        rri_array = rri_array * 1000.0  # Convert to milliseconds
+        print(f"  Converted units: mean RR interval = {np.mean(rri_array):.1f} ms")
+    elif mean_value > 10000:  # Likely in microseconds
+        warnings.warn(
+            f"RR intervals appear to be in microseconds (mean={mean_value:.0f}µs), "
+            f"converting to milliseconds"
+        )
+        rri_array = rri_array / 1000.0  # Convert to milliseconds
+        print(f"  Converted units: mean RR interval = {np.mean(rri_array):.1f} ms")
+    elif 200 < mean_value < 3000:  # Already in milliseconds
+        print(f"  RR intervals in milliseconds: mean = {mean_value:.1f} ms")
+    else:
+        warnings.warn(
+            f"Unusual RR interval range detected (mean={mean_value:.1f}). "
+            f"Please verify units are correct (should be milliseconds)."
+        )
 
     original_rri = rri_array.copy()
 

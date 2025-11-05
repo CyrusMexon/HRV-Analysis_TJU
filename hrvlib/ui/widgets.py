@@ -303,7 +303,7 @@ class TimeDomainWidget(MetricSectionWidget):
 
 
 class FrequencyDomainWidget(MetricSectionWidget):
-    """Widget for displaying frequency domain metrics"""
+    """Widget for displaying frequency domain metrics - FIXED to show all metrics like Kubios"""
 
     def __init__(self, parent=None):
         super().__init__("Frequency Domain Analysis", parent)
@@ -321,10 +321,10 @@ class FrequencyDomainWidget(MetricSectionWidget):
         self.table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
-        self.table.setShowGrid(False)  # Disable grid lines
-        self.table.setFrameStyle(QtWidgets.QFrame.Shape.NoFrame)  # Remove frame
+        self.table.setShowGrid(False)
+        self.table.setFrameStyle(QtWidgets.QFrame.Shape.NoFrame)
 
-        # FIXED: Updated styling and colors
+        # Style the table
         self.table.setStyleSheet(
             """
             QTableWidget {
@@ -354,49 +354,85 @@ class FrequencyDomainWidget(MetricSectionWidget):
         """
         )
 
-        # FIXED: Set row height
         self.table.verticalHeader().setDefaultSectionSize(40)
 
         layout.addWidget(self.table)
         self.set_content_layout(layout)
 
     def update_metrics(self, frequency_data):
-        """Update the table with frequency domain metrics"""
+        """Update the table with frequency domain metrics - COMPLETE VERSION"""
         if not frequency_data:
             self.table.setRowCount(0)
             return
 
+        # Define ALL metrics to display (matching Kubios output)
         metrics = [
-            ("VLF_power", "VLF Power", "ms²"),
-            ("LF_power", "LF Power", "ms²"),
-            ("HF_power", "HF Power", "ms²"),
-            ("total_power", "Total Power", "ms²"),
-            ("LF_HF_ratio", "LF/HF Ratio", ""),
-            ("LF_nu", "LF (n.u.)", "%"),
-            ("HF_nu", "HF (n.u.)", "%"),
+            # Absolute powers
+            ("VLF_power", "VLF Power", "ms²", 2),
+            ("vlf_power", "VLF Power", "ms²", 2),  # Alternative key
+            ("LF_power", "LF Power", "ms²", 2),
+            ("lf_power", "LF Power", "ms²", 2),  # Alternative key
+            ("HF_power", "HF Power", "ms²", 2),
+            ("hf_power", "HF Power", "ms²", 2),  # Alternative key
+            ("total_power", "Total Power", "ms²", 2),
+            # Peak frequencies
+            ("peak_freq_lf", "LF Peak Frequency", "Hz", 4),
+            ("peak_freq_hf", "HF Peak Frequency", "Hz", 4),
+            # Relative powers (percentage of total)
+            ("VLF_power_nu", "VLF Power (%)", "%", 2),
+            ("vlf_power_nu", "VLF Power (%)", "%", 2),
+            ("LF_power_nu", "LF Power (%)", "%", 2),
+            ("lf_power_nu", "LF Power (%)", "%", 2),
+            ("HF_power_nu", "HF Power (%)", "%", 2),
+            ("hf_power_nu", "HF Power (%)", "%", 2),
+            # Normalized units (LF and HF as % of LF+HF)
+            ("relative_lf_power", "LF (n.u.)", "%", 2),
+            ("relative_hf_power", "HF (n.u.)", "%", 2),
+            # LF/HF ratio
+            ("LF_HF_ratio", "LF/HF Ratio", "", 3),
+            ("lf_hf_ratio", "LF/HF Ratio", "", 3),
         ]
 
-        available_metrics = [
-            (key, name, unit)
-            for key, name, unit in metrics
-            if key in frequency_data and isinstance(frequency_data[key], (int, float))
-        ]
+        # Collect available metrics (avoid duplicates)
+        available_metrics = []
+        seen_names = set()
+
+        for key, name, unit, precision in metrics:
+            if key in frequency_data and name not in seen_names:
+                value = frequency_data[key]
+                if isinstance(value, (int, float)):
+                    # Skip NaN or inf values for cleaner display
+                    if not (np.isnan(value) or np.isinf(value)):
+                        available_metrics.append((key, name, unit, value, precision))
+                        seen_names.add(name)
+
+        if not available_metrics:
+            # Show message if no metrics available
+            self.table.setRowCount(1)
+            msg_item = QtWidgets.QTableWidgetItem(
+                "No frequency domain metrics available"
+            )
+            msg_item.setFlags(msg_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(0, 0, msg_item)
+            self.table.setSpan(0, 0, 1, 3)
+            return
 
         self.table.setRowCount(len(available_metrics))
 
-        for row, (key, name, unit) in enumerate(available_metrics):
-            value = frequency_data[key]
-
+        for row, (key, name, unit, value, precision) in enumerate(available_metrics):
+            # Metric name
             name_item = QtWidgets.QTableWidgetItem(name)
             name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
 
-            value_item = QtWidgets.QTableWidgetItem(f"{value:.2f}")
+            # Value with appropriate precision
+            value_item = QtWidgets.QTableWidgetItem(f"{value:.{precision}f}")
             value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             value_item.setTextAlignment(
                 QtCore.Qt.AlignmentFlag.AlignRight
                 | QtCore.Qt.AlignmentFlag.AlignVCenter
             )
 
+            # Unit
             unit_item = QtWidgets.QTableWidgetItem(unit)
             unit_item.setFlags(unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
 
@@ -405,7 +441,8 @@ class FrequencyDomainWidget(MetricSectionWidget):
             self.table.setItem(row, 2, unit_item)
 
         self.table.resizeColumnsToContents()
-        # FIXED: Set minimum height to show all rows without scrolling
+
+        # Set minimum height to show all rows
         row_height = 40
         header_height = 40
         min_height = len(available_metrics) * row_height + header_height + 20
