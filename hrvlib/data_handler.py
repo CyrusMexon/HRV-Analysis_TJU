@@ -307,6 +307,21 @@ def load_rr_file(
                 warnings.warn("No sampling rate found; assuming 1000 Hz (DEV MODE).")
                 bundle.meta["fs"] = 1000
 
+    #  DEBUG BLOCK:
+    print(f"\n=== POST-LOAD DEBUG ===")
+    print(f"File: {os.path.basename(path)}")
+    print(f"Format: {ext}")
+    print(f"RRI count: {len(bundle.rri_ms)}")
+    print(f"PPI count: {len(bundle.ppi_ms)}")
+    print(f"ECG channels: {len(bundle.ecg)}")
+    if bundle.ecg:
+        for i, ecg in enumerate(bundle.ecg):
+            print(f"  ECG[{i}]: {len(ecg.data)} samples @ {ecg.fs} Hz")
+    print(f"PPG channels: {len(bundle.ppg)}")
+    print(f"RESP channels: {len(bundle.resp)}")
+    print(f"Metadata fs: {bundle.meta.get('fs', 'NOT SET')}")
+    print(f"======================\n")
+
     # FR-6 add source info if not already present
     if bundle.source is None:
         bundle.source = SourceInfo(
@@ -334,6 +349,10 @@ def load_rr_file(
 
     # Derive RRI/PPI from ECG/PPG if missing (Pan–Tompkins etc.)
     bundle = _extract_intervals_from_waveforms(bundle)
+
+    print(f"\n=== POST-EXTRACTION DEBUG ===")
+    print(f"RRI count after extraction: {len(bundle.rri_ms)}")
+    print(f"==============================\n")
 
     # Auto-preprocessing if requested
     if auto_preprocess and bundle.rri_ms:
@@ -483,6 +502,7 @@ def _load_txt(path: str, df_override=None) -> DataBundle:
 
 # ---- EDF (ECG/PPG/RESP waveforms; some devices export RR too via events) ----
 def _load_edf(path: str) -> DataBundle:
+    """Load EDF file with enhanced debugging"""
     f = pyedflib.EdfReader(path)
     n = f.signals_in_file
     labels = f.getSignalLabels()
@@ -498,6 +518,9 @@ def _load_edf(path: str) -> DataBundle:
     # Track sampling rates to set a global fs
     detected_fs = []
 
+    # NEW: Check for RR interval channels
+    rr_channel_found = False
+
     # Channel loop
     for i in range(n):
         sig = f.readSignal(i)
@@ -509,6 +532,37 @@ def _load_edf(path: str) -> DataBundle:
         print(f"  - Samples: {len(sig)}, fs: {fs_list[i]} Hz")
         print(f"  - Value range: [{np.min(sig):.3f}, {np.max(sig):.3f}]")
 
+        # NEW: Check if this might be an RR interval channel
+        label_lower = label.lower()
+        if any(
+            marker in label_lower
+            for marker in ["rr", "r-r", "nn", "ibi", "interval", "beat"]
+        ):
+            print(f"  ! Potential RR interval channel detected")
+            # Check if values are in reasonable RR range
+            mean_val = np.mean(sig)
+            if 0.3 < mean_val < 3.0:  # Likely in seconds
+                rri_ms = sig * 1000.0
+                print(f"  ✓ Treating as RR intervals in seconds (mean={mean_val:.3f}s)")
+            elif 300 < mean_val < 3000:  # Likely in milliseconds
+                rri_ms = sig
+                print(
+                    f"  ✓ Treating as RR intervals in milliseconds (mean={mean_val:.1f}ms)"
+                )
+            else:
+                print(f"  ✗ Values out of expected RR range (mean={mean_val:.1f})")
+                rri_ms = None
+
+            if rri_ms is not None:
+                # Remove zeros and invalid values
+                rri_valid = rri_ms[(rri_ms > 200) & (rri_ms < 3000)]
+                if len(rri_valid) > 10:
+                    bundle.rri_ms = rri_valid.tolist()
+                    bundle.meta["rr_source"] = "edf_channel"
+                    bundle.meta["rr_channel_name"] = label
+                    rr_channel_found = True
+                    print(f"  ✓ Loaded {len(bundle.rri_ms)} RR intervals from channel")
+
         if kind in ("ECG", "PPG", "RESP"):
             fs = float(fs_list[i])
             ts = TimeSeries(
@@ -519,18 +573,16 @@ def _load_edf(path: str) -> DataBundle:
             )
             getattr(bundle, kind.lower()).append(ts)
             detected_fs.append(fs)
+            print(f"  ✓ Added to bundle.{kind.lower()}")
+        else:
+            print(f"  ✗ Skipped (not ECG/PPG/RESP)")
 
     # Set global fs in metadata
-    # Use the most common sampling rate, or the first one if all are different
     if detected_fs:
-        # Find most common fs
         unique_fs = list(set(detected_fs))
         if len(unique_fs) == 1:
-            # All channels have same fs
             bundle.meta["fs"] = unique_fs[0]
         else:
-            # Multiple different sampling rates - use the most common one
-            # or the highest one (typically ECG has highest fs)
             fs_counts = {fs: detected_fs.count(fs) for fs in unique_fs}
             most_common_fs = max(fs_counts, key=fs_counts.get)
             bundle.meta["fs"] = most_common_fs
@@ -540,14 +592,53 @@ def _load_edf(path: str) -> DataBundle:
             )
 
     print(f"\n=== EDF Loading Summary ===")
+    print(
+        f"RR intervals found: {len(bundle.rri_ms) > 0} ({len(bundle.rri_ms)} intervals)"
+    )
     print(f"ECG channels loaded: {len(bundle.ecg)}")
     print(f"PPG channels loaded: {len(bundle.ppg)}")
     print(f"RESP channels loaded: {len(bundle.resp)}")
     print(f"Global fs: {bundle.meta.get('fs', 'NOT SET')}")
-    print(f"===========================\n")
 
-    # Some EDF may have RR annotations; pyedflib does not always expose them.
-    # If you standardize RR export via separate channel label, add it here.
+    # HEURISTIC: If no ECG/PPG found but we have unidentified channels,
+    # tentatively treat first channel as ECG (common in Holter monitors)
+    if not bundle.ecg and not bundle.ppg and not bundle.rri_ms and n > 0:
+        print(f"\nNo ECG/PPG detected. Attempting heuristic ECG detection...")
+        for i in range(n):
+            sig = f.readSignal(i)
+            label = labels[i] if i < len(labels) else f"ch{i}"
+
+            # Skip if already identified as RESP
+            if any(r in label.lower() for r in ["resp", "abdo", "thor", "breath"]):
+                continue
+
+            # Check if signal characteristics suggest ECG
+            # ECG typically has sharper peaks than respiration
+            sig_std = np.std(sig)
+            sig_range = np.max(sig) - np.min(sig)
+
+            # Basic heuristic: reasonable amplitude range
+            if 10 < sig_range < 10000 and sig_std > 1:
+                print(f"  Channel '{label}' has ECG-like characteristics")
+                print(f"    Range: {sig_range:.1f}, Std: {sig_std:.1f}")
+
+                # Ask user or use as ECG
+                fs = float(fs_list[i])
+                ts = TimeSeries(
+                    name="ECG",
+                    data=np.asarray(sig, dtype=float),
+                    fs=fs,
+                    units=None,
+                )
+                bundle.ecg.append(ts)
+                if not bundle.meta.get("fs"):
+                    bundle.meta["fs"] = fs
+                print(f"  ✓ Tentatively using '{label}' as ECG channel")
+                bundle.meta["ecg_detection"] = "heuristic"
+                bundle.meta["ecg_original_label"] = label
+                break
+
+    print(f"===========================\n")
 
     f.close()
     return bundle
@@ -840,23 +931,83 @@ def _coerce_float_list(x) -> List[float]:
 def _label_to_kind(label: str) -> Optional[str]:
     """
     Heuristic EDF/ACQ channel labeling → 'ECG' | 'PPG' | 'RESP' | None
+    Enhanced to handle more channel naming conventions
     """
     if not label:
         return None
+
+    # Normalize: lowercase, remove extra spaces, remove special chars
     s = label.strip().lower()
-    # ECG markers
-    if any(
-        k in s for k in ["ecg", "ii", "v1", "lead", "leads", "mlII", "ml-ii", "ml ii"]
-    ):
-        return "ECG"
+    s = s.replace("_", " ").replace("-", " ").replace(".", " ")
+
+    # ECG/EKG markers - expanded list
+    ecg_markers = [
+        "ecg",
+        "ekg",
+        "ecard",  # Common abbreviations
+        "ii",
+        "iii",
+        "avr",
+        "avl",
+        "avf",  # Lead names
+        "v1",
+        "v2",
+        "v3",
+        "v4",
+        "v5",
+        "v6",  # Chest leads
+        "lead",
+        "leads",  # Generic lead names
+        "mlii",
+        "ml ii",
+        "ml-ii",  # Modified limb leads
+        "heart",
+        "cardiac",  # Descriptive names
+        "einthoven",  # Less common
+        "direct",  # Direct ECG recording (common in some devices)
+    ]
+
+    # Check for ECG
+    for marker in ecg_markers:
+        if marker in s:
+            return "ECG"
+
+    # Special case: single letter followed by number (like "i1", "ii", "2")
+    # might be ECG lead if file has few channels
+    if len(s) <= 3 and any(c.isdigit() for c in s):
+        # Could be a lead designation, tentatively mark as ECG
+        # This will be logged and user can see it
+        pass
+
     # PPG markers
-    if any(k in s for k in ["ppg", "pulse", "pleth", "oxim"]):
-        return "PPG"
-    # Resp markers
-    if any(
-        k in s for k in ["resp", "respiration", "thor", "abdo", "breath", "airflow"]
-    ):
-        return "RESP"
+    ppg_markers = ["ppg", "pleth", "pulse", "oxim", "spo2", "photo"]
+    for marker in ppg_markers:
+        if marker in s:
+            return "PPG"
+
+    # Respiration markers - expanded
+    resp_markers = [
+        "resp",
+        "respiration",
+        "breathing",
+        "breath",
+        "thor",
+        "thorax",
+        "thoracic",  # Thoracic belt
+        "abdo",
+        "abdomen",
+        "abdominal",  # Abdominal belt
+        "airflow",
+        "flow",
+        "nasal",  # Nasal airflow
+        "co2",
+        "etco2",
+        "capno",  # Capnography
+    ]
+    for marker in resp_markers:
+        if marker in s:
+            return "RESP"
+
     return None
 
 

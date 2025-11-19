@@ -1298,7 +1298,7 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
                 term in warning_lower
                 for term in ["threshold exceeded", "high", "poor", "exceeds"]
             ):
-                item.setBackground(QtGui.QColor(255, 200, 200))  # Light red
+                item.setBackground(QtGui.QColor(255, 200, 200, 150))  # Light red
                 item.setIcon(
                     self.style().standardIcon(
                         QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical
@@ -1308,14 +1308,14 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
                 term in warning_lower
                 for term in ["moderate", "monitor", "consider", "may limit"]
             ):
-                item.setBackground(QtGui.QColor(255, 255, 200))  # Light yellow
+                item.setBackground(QtGui.QColor(255, 255, 200, 150))  # Light yellow
                 item.setIcon(
                     self.style().standardIcon(
                         QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
                     )
                 )
             else:
-                item.setBackground(QtGui.QColor(200, 200, 255))  # Light blue
+                item.setBackground(QtGui.QColor(200, 200, 255, 150))  # Light blue
                 item.setIcon(
                     self.style().standardIcon(
                         QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation

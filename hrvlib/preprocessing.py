@@ -318,6 +318,7 @@ def preprocess_rri(
     ectopic_threshold: float = 0.3,
     correction_method: str = "cubic_spline",
     noise_detection: bool = True,
+    artifact_correction_enabled: bool = True,  # NEW: Allow disabling correction
 ) -> PreprocessingResult:
     """
     Complete preprocessing pipeline for RR intervals with proper extra beat handling and noise detection.
@@ -398,11 +399,11 @@ def preprocess_rri(
     ]
     other_types = [t for t in artifact_types if t != "extra"]
 
-    # Step 4: Handle extra beats first (removal/merging)
+    # Step 4: Handle extra beats first (removal/merging) - ONLY IF CORRECTION ENABLED
     corrected_rri = rri_array.copy()
     extra_corrected_indices = []
 
-    if extra_indices:
+    if artifact_correction_enabled and extra_indices:
         corrected_rri, extra_corrected_indices = correct_extra_beats(
             corrected_rri, extra_indices
         )
@@ -420,9 +421,13 @@ def preprocess_rri(
 
         other_indices = adjusted_other_indices
 
-    # Step 5: Handle missed beats and ectopic beats (interpolation)
+    # Step 5: Handle missed beats and ectopic beats (interpolation) - ONLY IF CORRECTION ENABLED
     interpolation_indices = []
-    if other_indices and correction_method == "cubic_spline":
+    if (
+        artifact_correction_enabled
+        and other_indices
+        and correction_method == "cubic_spline"
+    ):
         corrected_rri, interpolation_indices = cubic_spline_interpolation(
             corrected_rri, other_indices
         )
@@ -449,6 +454,7 @@ def preprocess_rri(
         "extra_beats_removed": len(extra_corrected_indices),
         "intervals_interpolated": len(interpolation_indices),
         "artifact_percentage": artifact_percentage,
+        "correction_applied": artifact_correction_enabled,  # NEW: Track if correction was enabled
         "noise_segments_count": len(noise_segments),
         "noise_percentage": (
             sum(end - start for start, end in noise_segments) / len(original_rri)

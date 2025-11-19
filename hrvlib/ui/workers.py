@@ -104,6 +104,11 @@ class PipelineWorker(QObject):
         """Convert GUI preprocessing parameters to preprocessing config format"""
         preprocessing_params = self.analysis_parameters.get("preprocessing", {})
 
+        # CRITICAL: Check if artifact correction is enabled
+        artifact_correction_enabled = preprocessing_params.get(
+            "artifact_correction", True
+        )
+
         # Get the correction threshold from GUI (should be 0.05 = 5%)
         gui_threshold_fraction = float(
             preprocessing_params.get("correction_threshold", 0.05)
@@ -117,6 +122,7 @@ class PipelineWorker(QObject):
 
         # Map GUI parameters to the actual preprocess_rri function parameters
         return {
+            "artifact_correction_enabled": artifact_correction_enabled,  # NEW: Pass the checkbox state
             "threshold_low": 300.0,  # Min RR interval (ms) - Kubios default
             "threshold_high": 2000.0,  # Max RR interval (ms) - Kubios default
             "ectopic_threshold": ectopic_threshold,  # 20% relative change for ectopic detection
@@ -145,6 +151,19 @@ class PipelineWorker(QObject):
 
         # Convert detrending parameters
         detrend_params = self.analysis_parameters.get("detrending", {})
+
+        # CRITICAL FIX: Map smoothness_priors to linear until SP is implemented
+        detrend_method = str(detrend_params.get("method", "linear"))
+        if detrend_method == "smoothness_priors":
+            print(
+                "WARNING: Smoothness Priors not implemented yet, using 'linear' detrending"
+            )
+            detrend_method = "linear"
+
+        # Validate detrend_method
+        if detrend_method not in ["linear", "constant"]:
+            print(f"WARNING: Invalid detrend method '{detrend_method}', using 'linear'")
+            detrend_method = "linear"
 
         return {
             "time_domain": {
