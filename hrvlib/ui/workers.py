@@ -126,7 +126,7 @@ class PipelineWorker(QObject):
             "threshold_low": 300.0,  # Min RR interval (ms) - Kubios default
             "threshold_high": 2000.0,  # Max RR interval (ms) - Kubios default
             "ectopic_threshold": ectopic_threshold,  # 20% relative change for ectopic detection
-            "correction_method": str(
+            "interpolation_method": str(
                 preprocessing_params.get("interpolation_method", "cubic_spline")
             ),
             "noise_detection": True,  # Always enable noise detection
@@ -176,6 +176,7 @@ class PipelineWorker(QObject):
                 "detrend_method": str(
                     detrend_params.get("method", "linear")
                 ),  # Ensure string
+                "detrend_lambda": float(detrend_params.get("lambda", 500)),
                 "window_type": str(
                     freq_params.get("window_function", "hann")
                 ),  # Ensure string

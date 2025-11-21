@@ -115,6 +115,7 @@ class UnifiedHRVPipeline:
                 "enabled": True,
                 "sampling_rate": 4.0,
                 "detrend_method": "linear",
+                "detrend_lambda": 500.0,
                 "window_type": "hann",
                 "segment_length": 120.0,
                 "overlap_ratio": 0.75,
@@ -165,7 +166,7 @@ class UnifiedHRVPipeline:
     ) -> Optional[Dict]:
         """Run frequency domain analysis on preprocessed data"""
         try:
-            config = self.analysis_config.get("freq_domain", {})
+            config = self.analysis_config.get("frequency_domain", {})
             if not config.get("enabled", True):
                 return None
 
@@ -176,6 +177,7 @@ class UnifiedHRVPipeline:
                 preprocessing_result=self.preprocessing_result,
                 sampling_rate=config.get("sampling_rate", 4.0),
                 detrend_method=config.get("detrend_method", "linear"),
+                detrend_lambda=config.get("detrend_lambda", 500),
                 window_type=config.get("window_type", "hann"),
                 segment_length=config.get("segment_length", 120.0),
                 overlap_ratio=config.get("overlap_ratio", 0.75),
@@ -296,8 +298,29 @@ class UnifiedHRVPipeline:
 
     def _run_preprocessing(self) -> Tuple[np.ndarray, PreprocessingResult]:
         """Run preprocessing on the bundle's RRI data"""
+        # Map GUI parameter names to function parameter names
+        preprocessing_params = self.preprocessing_config.copy()
+
+        # Map interpolation_method -> correction_method if present
+        if "interpolation_method" in preprocessing_params:
+            preprocessing_params["correction_method"] = preprocessing_params.pop(
+                "interpolation_method"
+            )
+
+        # Remove any parameters that aren't valid for preprocess_rri
+        valid_params = {
+            "threshold_low",
+            "threshold_high",
+            "ectopic_threshold",
+            "correction_method",
+            "noise_detection",
+        }
+        preprocessing_params = {
+            k: v for k, v in preprocessing_params.items() if k in valid_params
+        }
+
         preprocessing_result = preprocess_rri(
-            self.bundle.rri_ms, **self.preprocessing_config
+            self.bundle.rri_ms, **preprocessing_params
         )
         return preprocessing_result.corrected_rri, preprocessing_result
 

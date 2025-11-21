@@ -6,6 +6,8 @@ import warnings
 # Import from existing modules to maintain consistency
 from hrvlib.preprocessing import PreprocessingResult
 
+from hrvlib.signal_processing.smoothness_priors import detrend_with_smoothness_priors
+
 
 class HRVFreqDomainAnalysis:
     """
@@ -25,7 +27,7 @@ class HRVFreqDomainAnalysis:
         "bohman",
         "nuttall",
     ]
-    VALID_DETRENDS = ["linear", "constant", None]
+    VALID_DETRENDS = ["linear", "constant", "smoothness_priors", None]
     DEFAULT_FREQ_BANDS = {
         "ulf": (0.0, 0.003),
         "vlf": (0.003, 0.04),
@@ -40,6 +42,7 @@ class HRVFreqDomainAnalysis:
         preprocessing_result: Optional[PreprocessingResult] = None,
         sampling_rate: float = 4.0,
         detrend_method: Optional[str] = "linear",
+        detrend_lambda: float = 500,
         window_type: str = "hann",
         segment_length: float = 120.0,
         overlap_ratio: float = 0.75,
@@ -49,7 +52,8 @@ class HRVFreqDomainAnalysis:
         preprocessed_rri: Preprocessed RR intervals in milliseconds
             preprocessing_result: Results from preprocessing step
             sampling_rate: Resampling frequency in Hz (default 4 Hz)
-            detrend_method: Detrending method ('linear', 'constant', None)
+            detrend_method: Detrending method ('linear', 'constant', 'smoothness_priors', None)
+            detrend_lambda: Lambda parameter for smoothness_priors detrending (default 500)
             window_type: Window function type (default 'hann')
             segment_length: Segment length in seconds for Welch method
             overlap_ratio: Overlap ratio for segments (0-1)
@@ -59,6 +63,7 @@ class HRVFreqDomainAnalysis:
         self.preprocessing_result = preprocessing_result
         self.sampling_rate = sampling_rate
         self.detrend_method = detrend_method
+        self.detrend_lambda = detrend_lambda
         self.window_type = window_type
         self.segment_length = segment_length
         self.overlap_ratio = overlap_ratio
@@ -206,21 +211,65 @@ class HRVFreqDomainAnalysis:
             )
             window = signal.windows.hann(nperseg)
 
-        # Compute PSD with error handling
-        try:
-            freqs, psd = signal.welch(
-                x=self.time_domain,
-                fs=self.sampling_rate,
-                window=window,
-                nperseg=nperseg,
-                noverlap=noverlap,
-                detrend=self.detrend_method,
-                scaling="density",
-                average="mean",
-            )
-        except Exception as e:
-            warnings.warn(f"Welch PSD computation failed: {e}")
-            return np.array([]), np.array([])
+        # Handle smoothness priors detrending separately
+        if self.detrend_method == "smoothness_priors":
+            # Apply smoothness priors to the time domain signal BEFORE Welch
+            try:
+                detrended_signal = detrend_with_smoothness_priors(
+                    self.time_domain,
+                    lambda_param=self.detrend_lambda,
+                    fs=self.sampling_rate,
+                    return_trend=False,
+                )
+
+                # Now compute Welch WITHOUT additional detrending (we already detrended)
+                freqs, psd = signal.welch(
+                    x=detrended_signal,
+                    fs=self.sampling_rate,
+                    window=window,
+                    nperseg=nperseg,
+                    noverlap=noverlap,
+                    detrend=False,  # ✅ No detrending - already done!
+                    scaling="density",
+                    average="mean",
+                )
+
+            except Exception as e:
+                warnings.warn(
+                    f"Smoothness priors detrending failed: {e}. "
+                    f"Falling back to linear detrending."
+                )
+                # Fallback to linear detrending
+                freqs, psd = signal.welch(
+                    x=self.time_domain,
+                    fs=self.sampling_rate,
+                    window=window,
+                    nperseg=nperseg,
+                    noverlap=noverlap,
+                    detrend="linear",
+                    scaling="density",
+                    average="mean",
+                )
+
+        else:
+            # Standard scipy detrending (linear, constant, or None)
+            # Map None to False for scipy
+            detrend_param = self.detrend_method if self.detrend_method else False
+
+            try:
+                freqs, psd = signal.welch(
+                    x=self.time_domain,
+                    fs=self.sampling_rate,
+                    window=window,
+                    nperseg=nperseg,
+                    noverlap=noverlap,
+                    detrend=detrend_param,
+                    scaling="density",
+                    average="mean",
+                )
+            except Exception as e:
+                warnings.warn(f"Welch PSD computation failed: {e}")
+                return np.array([]), np.array([])
 
         # Validate PSD results
         if len(psd) == 0 or np.all(psd == 0):
