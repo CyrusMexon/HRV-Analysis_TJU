@@ -152,16 +152,19 @@ class PipelineWorker(QObject):
         # Convert detrending parameters
         detrend_params = self.analysis_parameters.get("detrending", {})
 
-        # CRITICAL FIX: Map smoothness_priors to linear until SP is implemented
-        detrend_method = str(detrend_params.get("method", "linear"))
-        if detrend_method == "smoothness_priors":
-            print(
-                "WARNING: Smoothness Priors not implemented yet, using 'linear' detrending"
-            )
-            detrend_method = "linear"
+        # Get detrend method and convert "none" string to None
+        detrend_method_raw = detrend_params.get("method", "linear")
+
+        # Convert string "none" to None for the pipeline
+        if detrend_method_raw == "none":
+            detrend_method = None
+        elif detrend_method_raw == "smoothness_priors":
+            detrend_method = "smoothness_priors"
+        else:
+            detrend_method = str(detrend_method_raw)
 
         # Validate detrend_method
-        if detrend_method not in ["linear", "constant"]:
+        if detrend_method not in ["linear", "constant", "smoothness_priors", None]:
             print(f"WARNING: Invalid detrend method '{detrend_method}', using 'linear'")
             detrend_method = "linear"
 
@@ -173,9 +176,7 @@ class PipelineWorker(QObject):
             "frequency_domain": {
                 "enabled": True,
                 "sampling_rate": 4.0,  # Standard for HRV
-                "detrend_method": str(
-                    detrend_params.get("method", "linear")
-                ),  # Ensure string
+                "detrend_method": detrend_method,
                 "detrend_lambda": float(detrend_params.get("lambda", 500)),
                 "window_type": str(
                     freq_params.get("window_function", "hann")

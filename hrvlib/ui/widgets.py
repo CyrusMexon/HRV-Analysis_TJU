@@ -1893,7 +1893,7 @@ class SignalViewerWidget(QtWidgets.QWidget):
                 ax5.tick_params(labelsize=8)
 
             # Plot 6: DFA Analysis - better layout
-            if self.results.nonlinear and "dfa" in self.results.nonlinear:
+            if self.results.nonlinear and "dfa" in self.results.nonlinear and isinstance(self.results.nonlinear["dfa"], dict):
                 dfa_data = self.results.nonlinear["dfa"]
 
                 # Get raw DFA data first
