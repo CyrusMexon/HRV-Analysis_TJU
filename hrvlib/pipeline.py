@@ -119,6 +119,7 @@ class UnifiedHRVPipeline:
                 "window_type": "hann",
                 "segment_length": 120.0,
                 "overlap_ratio": 0.75,
+                "ar_order": 16,
                 "analysis_window": None,
             },
             "nonlinear": {
@@ -177,10 +178,11 @@ class UnifiedHRVPipeline:
                 preprocessing_result=self.preprocessing_result,
                 sampling_rate=config.get("sampling_rate", 4.0),
                 detrend_method=config.get("detrend_method", "linear"),
-                detrend_lambda=config.get("detrend_lambda", 500),
+                detrend_lambda=config.get("detrend_lambda", 500.0),
                 window_type=config.get("window_type", "hann"),
                 segment_length=config.get("segment_length", 120.0),
                 overlap_ratio=config.get("overlap_ratio", 0.75),
+                ar_order=config.get("ar_order", 16),
                 analysis_window=window,
             )
 

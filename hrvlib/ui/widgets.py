@@ -28,6 +28,14 @@ class MetaPanel(QtWidgets.QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QtWidgets.QFormLayout(self)
+        self.layout.setSpacing(5)  # Spacing between rows
+        self.layout.setContentsMargins(5, 5, 5, 5)  # Margins
+        self.layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+        self.layout.setLabelAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
         self.labels = {}
 
         # Create labels for metadata fields
@@ -42,14 +50,19 @@ class MetaPanel(QtWidgets.QFrame):
         ):
             lbl = QtWidgets.QLabel("-")
             lbl.setStyleSheet(
-                "QLabel { color: #ffffff; font-weight: bold; background-color: gray; padding: 2px; }"
+                "QLabel { color: #2c3e50; font-weight: bold; background-color: #ecf0f1; padding: 4px; border: 1px solid #bdc3c7; border-radius: 2px; }"
+            )
+            lbl.setWordWrap(True)  # Allow text to wrap if needed
+            lbl.setMinimumHeight(22)  # Ensure minimum height for readability
+            lbl.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Preferred,
             )
             self.layout.addRow(key.replace("_", " ").title() + ":", lbl)
             self.labels[key] = lbl
 
         # Style the frame
         self.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
-        self.setMaximumHeight(200)
 
     def update_meta(self, source_dict):
         """Update metadata display with source information"""
@@ -305,6 +318,8 @@ class TimeDomainWidget(MetricSectionWidget):
 class FrequencyDomainWidget(MetricSectionWidget):
     """Widget for displaying frequency domain metrics - FIXED to show all metrics like Kubios"""
 
+    """Widget for displaying frequency domain metrics - FIXED to show all metrics like Kubios"""
+
     def __init__(self, parent=None):
         super().__init__("Frequency Domain Analysis", parent)
         self.setup_content()
@@ -323,7 +338,10 @@ class FrequencyDomainWidget(MetricSectionWidget):
         )
         self.table.setShowGrid(False)
         self.table.setFrameStyle(QtWidgets.QFrame.Shape.NoFrame)
+        self.table.setShowGrid(False)
+        self.table.setFrameStyle(QtWidgets.QFrame.Shape.NoFrame)
 
+        # Style the table
         # Style the table
         self.table.setStyleSheet(
             """
@@ -360,92 +378,122 @@ class FrequencyDomainWidget(MetricSectionWidget):
         self.set_content_layout(layout)
 
     def update_metrics(self, frequency_data):
-        """Update the table with frequency domain metrics - COMPLETE VERSION"""
+        """Update the table with frequency domain metrics - Shows both Welch and AR results"""
         if not frequency_data:
             self.table.setRowCount(0)
             return
 
-        # Define ALL metrics to display (matching Kubios output)
+        # Update table to have 5 columns: Metric, Welch Value, Welch Unit, AR Value, AR Unit
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Metric", "Welch", "Unit", "AR", "Unit"])
+
+        # Define metrics to display (key_base, display_name, unit, precision)
         metrics = [
-            # Absolute powers
-            ("VLF_power", "VLF Power", "ms²", 2),
-            ("vlf_power", "VLF Power", "ms²", 2),  # Alternative key
-            ("LF_power", "LF Power", "ms²", 2),
-            ("lf_power", "LF Power", "ms²", 2),  # Alternative key
-            ("HF_power", "HF Power", "ms²", 2),
-            ("hf_power", "HF Power", "ms²", 2),  # Alternative key
+            ("vlf_power", "VLF Power", "ms²", 2),
+            ("lf_power", "LF Power", "ms²", 2),
+            ("hf_power", "HF Power", "ms²", 2),
             ("total_power", "Total Power", "ms²", 2),
-            # Peak frequencies
-            ("peak_freq_lf", "LF Peak Frequency", "Hz", 4),
-            ("peak_freq_hf", "HF Peak Frequency", "Hz", 4),
-            # Relative powers (percentage of total)
-            ("VLF_power_nu", "VLF Power (%)", "%", 2),
-            ("vlf_power_nu", "VLF Power (%)", "%", 2),
-            ("LF_power_nu", "LF Power (%)", "%", 2),
-            ("lf_power_nu", "LF Power (%)", "%", 2),
-            ("HF_power_nu", "HF Power (%)", "%", 2),
-            ("hf_power_nu", "HF Power (%)", "%", 2),
-            # Normalized units (LF and HF as % of LF+HF)
-            ("relative_lf_power", "LF (n.u.)", "%", 2),
-            ("relative_hf_power", "HF (n.u.)", "%", 2),
-            # LF/HF ratio
-            ("LF_HF_ratio", "LF/HF Ratio", "", 3),
+            ("peak_freq_lf", "LF Peak Freq", "Hz", 3),
+            ("peak_freq_hf", "HF Peak Freq", "Hz", 3),
+            ("vlf_power_nu", "VLF (%)", "%", 1),
+            ("lf_power_nu", "LF (%)", "%", 1),
+            ("hf_power_nu", "HF (%)", "%", 1),
+            ("relative_lf_power", "LF (n.u.)", "%", 1),
+            ("relative_hf_power", "HF (n.u.)", "%", 1),
             ("lf_hf_ratio", "LF/HF Ratio", "", 3),
         ]
 
-        # Collect available metrics (avoid duplicates)
-        available_metrics = []
-        seen_names = set()
+        # Build rows with both Welch and AR values
+        rows_data = []
+        for key_base, name, unit, precision in metrics:
+            # Try to get Welch value (with or without prefix)
+            welch_val = frequency_data.get(f"welch_{key_base}")
+            if welch_val is None:
+                welch_val = frequency_data.get(key_base)
 
-        for key, name, unit, precision in metrics:
-            if key in frequency_data and name not in seen_names:
-                value = frequency_data[key]
-                if isinstance(value, (int, float)):
-                    # Skip NaN or inf values for cleaner display
-                    if not (np.isnan(value) or np.isinf(value)):
-                        available_metrics.append((key, name, unit, value, precision))
-                        seen_names.add(name)
+            # Try to get AR value
+            ar_val = frequency_data.get(f"ar_{key_base}")
 
-        if not available_metrics:
-            # Show message if no metrics available
+            # Only add row if at least one value exists
+            if welch_val is not None or ar_val is not None:
+                rows_data.append((name, welch_val, ar_val, unit, precision))
+
+        if not rows_data:
             self.table.setRowCount(1)
             msg_item = QtWidgets.QTableWidgetItem(
                 "No frequency domain metrics available"
             )
             msg_item.setFlags(msg_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(0, 0, msg_item)
-            self.table.setSpan(0, 0, 1, 3)
+            self.table.setSpan(0, 0, 1, 5)
             return
 
-        self.table.setRowCount(len(available_metrics))
+        self.table.setRowCount(len(rows_data))
 
-        for row, (key, name, unit, value, precision) in enumerate(available_metrics):
+        for row, (name, welch_val, ar_val, unit, precision) in enumerate(rows_data):
             # Metric name
             name_item = QtWidgets.QTableWidgetItem(name)
             name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            name_item.setFont(QtGui.QFont("", -1, QtGui.QFont.Weight.Bold))
 
-            # Value with appropriate precision
-            value_item = QtWidgets.QTableWidgetItem(f"{value:.{precision}f}")
-            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-            value_item.setTextAlignment(
+            # Welch value
+            if (
+                welch_val is not None
+                and isinstance(welch_val, (int, float))
+                and not (np.isnan(welch_val) or np.isinf(welch_val))
+            ):
+                welch_text = f"{welch_val:.{precision}f}"
+            else:
+                welch_text = "—"
+            welch_item = QtWidgets.QTableWidgetItem(welch_text)
+            welch_item.setFlags(welch_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            welch_item.setTextAlignment(
                 QtCore.Qt.AlignmentFlag.AlignRight
                 | QtCore.Qt.AlignmentFlag.AlignVCenter
             )
 
-            # Unit
-            unit_item = QtWidgets.QTableWidgetItem(unit)
-            unit_item.setFlags(unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            # Welch unit
+            welch_unit_item = QtWidgets.QTableWidgetItem(
+                unit if welch_text != "—" else ""
+            )
+            welch_unit_item.setFlags(
+                welch_unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable
+            )
+
+            # AR value
+            if (
+                ar_val is not None
+                and isinstance(ar_val, (int, float))
+                and not (np.isnan(ar_val) or np.isinf(ar_val))
+            ):
+                ar_text = f"{ar_val:.{precision}f}"
+            else:
+                ar_text = "—"
+            ar_item = QtWidgets.QTableWidgetItem(ar_text)
+            ar_item.setFlags(ar_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            ar_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+
+            # AR unit
+            ar_unit_item = QtWidgets.QTableWidgetItem(unit if ar_text != "—" else "")
+            ar_unit_item.setFlags(
+                ar_unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable
+            )
 
             self.table.setItem(row, 0, name_item)
-            self.table.setItem(row, 1, value_item)
-            self.table.setItem(row, 2, unit_item)
+            self.table.setItem(row, 1, welch_item)
+            self.table.setItem(row, 2, welch_unit_item)
+            self.table.setItem(row, 3, ar_item)
+            self.table.setItem(row, 4, ar_unit_item)
 
         self.table.resizeColumnsToContents()
 
-        # Set minimum height to show all rows
+        # Set minimum height
         row_height = 40
         header_height = 40
-        min_height = len(available_metrics) * row_height + header_height + 20
+        min_height = len(rows_data) * row_height + header_height + 20
         self.table.setMinimumHeight(min_height)
 
 
@@ -982,6 +1030,16 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
 
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(
+            2, 2, 8, 2
+        )  # Extra right margin to account for scrollbar
+        layout.setSpacing(8)
+
+        # Set size policy to prevent horizontal expansion
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
         # Analysis window group
         window_group = QtWidgets.QGroupBox("Analysis Window")
@@ -1060,16 +1118,22 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         freq_group = QtWidgets.QGroupBox("Frequency Analysis")
         freq_layout = QtWidgets.QFormLayout(freq_group)
 
-        self.psd_method = QtWidgets.QComboBox()
-        self.psd_method.addItems(["welch", "lomb_scargle", "fft"])
-        self.psd_method.currentTextChanged.connect(self.parameters_changed.emit)
+        self.ar_model_order = QtWidgets.QSpinBox()
+        self.ar_model_order.setRange(4, 32)
+        self.ar_model_order.setValue(16)
+        self.ar_model_order.setToolTip(
+            "AR model order for Autoregressive spectrum estimation.\n"
+            "Typical values: 16 (default), range 4-32.\n"
+            "Higher order = finer frequency resolution but more noise sensitivity."
+        )
+        self.ar_model_order.valueChanged.connect(self.parameters_changed.emit)
 
         self.window_function = QtWidgets.QComboBox()
         self.window_function.addItems(["hann", "hamming", "blackman", "bartlett"])
         self.window_function.currentTextChanged.connect(self.parameters_changed.emit)
 
-        freq_layout.addRow("PSD Method:", self.psd_method)
-        freq_layout.addRow("Window:", self.window_function)
+        freq_layout.addRow("AR Model Order:", self.ar_model_order)
+        freq_layout.addRow("Welch Window:", self.window_function)
 
         # Add all groups to main layout
         layout.addWidget(window_group)
@@ -1105,7 +1169,7 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
                 "lambda": self.detrending_lambda.value(),
             },
             "frequency_domain": {
-                "psd_method": self.psd_method.currentText(),
+                "ar_order": self.ar_model_order.value(),
                 "window_function": self.window_function.currentText(),
             },
         }
@@ -1134,8 +1198,8 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
 
         if "frequency_domain" in params:
             fd = params["frequency_domain"]
-            if "psd_method" in fd:
-                self.psd_method.setCurrentText(fd["psd_method"])
+            if "ar_order" in fd:
+                self.ar_model_order.setValue(fd["ar_order"])
             if "window_function" in fd:
                 self.window_function.setCurrentText(fd["window_function"])
 
@@ -1149,37 +1213,43 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
 
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(5)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # Quality metrics group
-        quality_group = QtWidgets.QGroupBox("Quality Metrics")
-        quality_layout = QtWidgets.QFormLayout(quality_group)
+        # Quality metrics - more compact
+        metrics_layout = QtWidgets.QFormLayout()
+        metrics_layout.setSpacing(3)
+        metrics_layout.setContentsMargins(5, 5, 5, 5)
 
         self.corrected_beats_label = QtWidgets.QLabel("0%")
         self.signal_quality_label = QtWidgets.QLabel("Unknown")
         self.rhythm_type_label = QtWidgets.QLabel("Unknown")
         self.artifact_density_label = QtWidgets.QLabel("0%")
 
-        quality_layout.addRow("Corrected Beats:", self.corrected_beats_label)
-        quality_layout.addRow("Signal Quality:", self.signal_quality_label)
-        quality_layout.addRow("Rhythm Type:", self.rhythm_type_label)
-        quality_layout.addRow("Artifact Density:", self.artifact_density_label)
+        metrics_layout.addRow("Corrected:", self.corrected_beats_label)
+        metrics_layout.addRow("Quality:", self.signal_quality_label)
+        metrics_layout.addRow("Rhythm:", self.rhythm_type_label)
+        metrics_layout.addRow("Artifacts:", self.artifact_density_label)
 
-        # Warnings group
-        warnings_group = QtWidgets.QGroupBox("Warnings & Alerts")
-        warnings_layout = QtWidgets.QVBoxLayout(warnings_group)
+        # Warnings - more compact
+        warnings_label = QtWidgets.QLabel("Warnings:")
+        warnings_label.setStyleSheet("font-weight: bold; font-size: 10px;")
 
         self.warnings_list = QtWidgets.QListWidget()
-        self.warnings_list.setMaximumHeight(120)
-        warnings_layout.addWidget(self.warnings_list)
+        self.warnings_list.setMaximumHeight(80)  # Reduced from 120
+        self.warnings_list.setStyleSheet("font-size: 9px;")  # Smaller font
 
         # Status indicator
         self.status_indicator = QtWidgets.QLabel("● Ready")
-        self.status_indicator.setStyleSheet("color: gray; font-weight: bold;")
+        self.status_indicator.setStyleSheet(
+            "color: gray; font-weight: bold; font-size: 10px;"
+        )
+        self.status_indicator.setMaximumHeight(25)
 
-        layout.addWidget(quality_group)
-        layout.addWidget(warnings_group)
+        layout.addLayout(metrics_layout)
+        layout.addWidget(warnings_label)
+        layout.addWidget(self.warnings_list)
         layout.addWidget(self.status_indicator)
-        layout.addStretch()
 
     def update_quality_assessment(self, results: HRVAnalysisResults):
         """Update quality assessment display with results - PIPELINE AWARE"""

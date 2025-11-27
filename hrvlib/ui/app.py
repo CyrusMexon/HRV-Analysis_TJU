@@ -58,17 +58,34 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QHBoxLayout(central_widget)
 
-        # Left control panel
+        # Left control panel with scroll area
         self.control_panel = QtWidgets.QWidget()
-        self.control_panel.setMinimumWidth(400)
-        self.control_panel.setMaximumWidth(550)
-        control_layout = QtWidgets.QVBoxLayout(self.control_panel)
+        self.control_panel.setMinimumWidth(430)
+        self.control_panel.setMaximumWidth(600)
+
+        # Create a scroll area for the entire control panel
+        control_scroll = QtWidgets.QScrollArea()
+        control_scroll.setWidgetResizable(True)
+        control_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        control_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        # Widget that will go inside the scroll area
+        control_content = QtWidgets.QWidget()
+        control_layout = QtWidgets.QVBoxLayout(control_content)
+        control_layout.setSpacing(10)
+        control_layout.setContentsMargins(5, 5, 5, 5)
 
         # Metadata
         meta_group = QtWidgets.QGroupBox("File Information")
         meta_layout = QtWidgets.QVBoxLayout(meta_group)
+        meta_layout.setSpacing(3)
+        meta_layout.setContentsMargins(8, 10, 5, 5)
         self.meta_panel = MetaPanel()
         meta_layout.addWidget(self.meta_panel)
+        meta_group.setMinimumHeight(180)  # Ensure adequate space for labels
+        meta_group.setMaximumHeight(220)  # Increased from 150
 
         # Parameters
         params_group = QtWidgets.QGroupBox("Analysis Parameters")
@@ -77,27 +94,52 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.params_widget = AnalysisParametersWidget()
         params_scroll.setWidget(self.params_widget)
         params_scroll.setWidgetResizable(True)
-        # params_scroll.setMaximumHeight(600)
+        params_scroll.setMinimumHeight(300)  # Reduced from 450
+        params_scroll.setMaximumHeight(400)  # Add maximum height
+        params_scroll.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        params_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )  # Disable horizontal scrollbar
         params_layout.addWidget(params_scroll)
+        params_layout.setContentsMargins(5, 5, 5, 5)
 
-        # Quality assessment
+        # Quality assessment with compact layout
+        quality_group = QtWidgets.QGroupBox("Quality Metrics")
+        quality_layout = QtWidgets.QVBoxLayout(quality_group)
         self.quality_widget = QualityAssessmentWidget()
+        quality_layout.addWidget(self.quality_widget)
+        quality_group.setMaximumHeight(280)  # Limit quality widget height
 
         # Control buttons
         button_group = QtWidgets.QGroupBox("Analysis Control")
         button_layout = QtWidgets.QVBoxLayout(button_group)
+        button_layout.setSpacing(8)
+        button_layout.setContentsMargins(5, 10, 5, 5)
         self.analyze_btn = QtWidgets.QPushButton("🔬 Run Analysis")
         self.analyze_btn.setEnabled(False)
+        self.analyze_btn.setMinimumHeight(32)  # Reduced from 40
+        self.analyze_btn.setMaximumHeight(35)
         self.export_btn = QtWidgets.QPushButton("📄 Export Results")
         self.export_btn.setEnabled(False)
+        self.export_btn.setMinimumHeight(32)  # Reduced from 40
+        self.export_btn.setMaximumHeight(35)
         button_layout.addWidget(self.analyze_btn)
         button_layout.addWidget(self.export_btn)
+        button_group.setMaximumHeight(110)  # Reduced from 140
 
         control_layout.addWidget(meta_group)
         control_layout.addWidget(params_group)
-        control_layout.addWidget(self.quality_widget)
+        control_layout.addWidget(quality_group)
         control_layout.addWidget(button_group)
         control_layout.addStretch()
+
+        # Set the control content as the scroll area's widget
+        control_scroll.setWidget(control_content)
+
+        # Add scroll area to control panel
+        control_panel_layout = QtWidgets.QVBoxLayout(self.control_panel)
+        control_panel_layout.setContentsMargins(0, 0, 0, 0)
+        control_panel_layout.addWidget(control_scroll)
 
         # Right tabbed interface
         self.tab_widget = QtWidgets.QTabWidget()

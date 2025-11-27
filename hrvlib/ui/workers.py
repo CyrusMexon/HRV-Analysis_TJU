@@ -180,6 +180,7 @@ class PipelineWorker(QObject):
                 "window_type": str(
                     freq_params.get("window_function", "hann")
                 ),  # Ensure string
+                "ar_order": int(freq_params.get("ar_order", 16)),  # AR model order
                 "segment_length": 120.0,
                 "overlap_ratio": 0.75,
                 "analysis_window": analysis_window,
