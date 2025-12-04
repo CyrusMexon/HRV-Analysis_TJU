@@ -378,14 +378,14 @@ class FrequencyDomainWidget(MetricSectionWidget):
         self.set_content_layout(layout)
 
     def update_metrics(self, frequency_data):
-        """Update the table with frequency domain metrics - Shows both Welch and AR results"""
+        """Update the table with frequency domain metrics - Shows Welch, FFT, and AR results"""
         if not frequency_data:
             self.table.setRowCount(0)
             return
 
-        # Update table to have 5 columns: Metric, Welch Value, Welch Unit, AR Value, AR Unit
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Metric", "Welch", "Unit", "AR", "Unit"])
+        # Update table to have 7 columns: Metric, Welch Value, Welch Unit, FFT Value, FFT Unit, AR Value, AR Unit
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Metric", "Welch", "Unit", "FFT", "Unit", "AR", "Unit"])
 
         # Define metrics to display (key_base, display_name, unit, precision)
         metrics = [
@@ -403,7 +403,7 @@ class FrequencyDomainWidget(MetricSectionWidget):
             ("lf_hf_ratio", "LF/HF Ratio", "", 3),
         ]
 
-        # Build rows with both Welch and AR values
+        # Build rows with Welch, FFT, and AR values
         rows_data = []
         for key_base, name, unit, precision in metrics:
             # Try to get Welch value (with or without prefix)
@@ -411,12 +411,15 @@ class FrequencyDomainWidget(MetricSectionWidget):
             if welch_val is None:
                 welch_val = frequency_data.get(key_base)
 
+            # Try to get FFT value
+            fft_val = frequency_data.get(f"fft_{key_base}")
+
             # Try to get AR value
             ar_val = frequency_data.get(f"ar_{key_base}")
 
             # Only add row if at least one value exists
-            if welch_val is not None or ar_val is not None:
-                rows_data.append((name, welch_val, ar_val, unit, precision))
+            if welch_val is not None or fft_val is not None or ar_val is not None:
+                rows_data.append((name, welch_val, fft_val, ar_val, unit, precision))
 
         if not rows_data:
             self.table.setRowCount(1)
@@ -425,12 +428,12 @@ class FrequencyDomainWidget(MetricSectionWidget):
             )
             msg_item.setFlags(msg_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(0, 0, msg_item)
-            self.table.setSpan(0, 0, 1, 5)
+            self.table.setSpan(0, 0, 1, 7)
             return
 
         self.table.setRowCount(len(rows_data))
 
-        for row, (name, welch_val, ar_val, unit, precision) in enumerate(rows_data):
+        for row, (name, welch_val, fft_val, ar_val, unit, precision) in enumerate(rows_data):
             # Metric name
             name_item = QtWidgets.QTableWidgetItem(name)
             name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
@@ -460,6 +463,30 @@ class FrequencyDomainWidget(MetricSectionWidget):
                 welch_unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable
             )
 
+            # FFT value
+            if (
+                fft_val is not None
+                and isinstance(fft_val, (int, float))
+                and not (np.isnan(fft_val) or np.isinf(fft_val))
+            ):
+                fft_text = f"{fft_val:.{precision}f}"
+            else:
+                fft_text = "—"
+            fft_item = QtWidgets.QTableWidgetItem(fft_text)
+            fft_item.setFlags(fft_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            fft_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+
+            # FFT unit
+            fft_unit_item = QtWidgets.QTableWidgetItem(
+                unit if fft_text != "—" else ""
+            )
+            fft_unit_item.setFlags(
+                fft_unit_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable
+            )
+
             # AR value
             if (
                 ar_val is not None
@@ -485,8 +512,10 @@ class FrequencyDomainWidget(MetricSectionWidget):
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, welch_item)
             self.table.setItem(row, 2, welch_unit_item)
-            self.table.setItem(row, 3, ar_item)
-            self.table.setItem(row, 4, ar_unit_item)
+            self.table.setItem(row, 3, fft_item)
+            self.table.setItem(row, 4, fft_unit_item)
+            self.table.setItem(row, 5, ar_item)
+            self.table.setItem(row, 6, ar_unit_item)
 
         self.table.resizeColumnsToContents()
 
@@ -1103,7 +1132,7 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         detrend_layout = QtWidgets.QFormLayout(detrend_group)
 
         self.detrending_method = QtWidgets.QComboBox()
-        self.detrending_method.addItems(["smoothness_priors", "linear", "none"])
+        self.detrending_method.addItems(["smoothness_priors", "linear", "constant", "none"])
         self.detrending_method.currentTextChanged.connect(self.parameters_changed.emit)
 
         self.detrending_lambda = QtWidgets.QDoubleSpinBox()
