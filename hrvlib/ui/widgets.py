@@ -1132,7 +1132,7 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         detrend_layout = QtWidgets.QFormLayout(detrend_group)
 
         self.detrending_method = QtWidgets.QComboBox()
-        self.detrending_method.addItems(["smoothness_priors", "linear", "constant", "none"])
+        self.detrending_method.addItems(["none", "constant", "linear", "smoothness_priors"])
         self.detrending_method.currentTextChanged.connect(self.parameters_changed.emit)
 
         self.detrending_lambda = QtWidgets.QDoubleSpinBox()
@@ -1682,11 +1682,14 @@ class SignalViewerWidget(QtWidgets.QWidget):
                 else:
                     self.interpolation_method = InterpolationMethod.LINEAR
 
-            except ImportError:
+            except Exception as e:
+                import traceback
+                print(f"Beat editor initialization failed: {type(e).__name__}: {e}")
+                traceback.print_exc()
                 self.editing_enabled = False
                 self.editing_btn.setEnabled(False)
                 self.editing_btn.setToolTip(
-                    "Beat editing not available - beat_editor module not found"
+                    f"Beat editing not available - {type(e).__name__}: {str(e)}"
                 )
 
         # Update plot based on current mode

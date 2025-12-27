@@ -33,9 +33,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(
-            "HRV Analysis Software v2.1.1 - SRS Compliant with Manual Editing"
-        )
+        self.setWindowTitle("HRV Studio v1.0")
         self.resize(1400, 900)
 
         # Data storage
@@ -48,9 +46,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         # UI setup
         self.setup_ui()
         self.setup_menu_bar()
-        self.statusBar().showMessage(
-            "Ready - Manual editing enabled (SRS FR-10 to FR-14)"
-        )
+        self.statusBar().showMessage("Ready - Manual editing enabled")
 
     def setup_ui(self):
         """Setup central layout"""
@@ -357,24 +353,20 @@ class HRVMainWindow(QtWidgets.QMainWindow):
             )
 
             # Update window title to indicate quality issue
-            self.setWindowTitle(
-                "HRV Analysis Software v2.1.1 - ⚠️ QUALITY WARNING: >5% corrected"
-            )
+            self.setWindowTitle("HRV Studio v1.0 - ⚠️ QUALITY WARNING: >5% corrected")
 
         elif corrected_percentage > 2.0:
             self.statusBar().showMessage(
                 f"Quality: {corrected_percentage:.1f}% beats corrected - Monitor quality"
             )
-            self.setWindowTitle("HRV Analysis Software v2.1.1 - Manual editing active")
+            self.setWindowTitle("HRV Studio v1.0 - Manual editing active")
         elif corrected_percentage > 0:
             self.statusBar().showMessage(
                 f"Quality: {corrected_percentage:.1f}% beats corrected - Good quality"
             )
-            self.setWindowTitle("HRV Analysis Software v2.1.1 - Manual editing active")
+            self.setWindowTitle("HRV Studio v1.0 - Manual editing active")
         else:
-            self.setWindowTitle(
-                "HRV Analysis Software v2.1.1 - SRS Compliant with Manual Editing"
-            )
+            self.setWindowTitle("HRV Studio v1.0")
 
     def on_reanalysis_requested(self):
         """Handle reanalysis requests after editing"""
@@ -452,9 +444,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         # Create export dialog
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle(
-            "Export Results - SRS Compliant (FR-24 to FR-30) with Manual Editing"
-        )
+        dialog.setWindowTitle("Export Results")
         dialog.setModal(True)
         dialog.resize(450, 500)
 

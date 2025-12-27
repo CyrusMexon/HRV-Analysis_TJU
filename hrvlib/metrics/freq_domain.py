@@ -46,7 +46,7 @@ class HRVFreqDomainAnalysis:
         preprocessed_rri: np.ndarray,
         preprocessing_result: Optional[PreprocessingResult] = None,
         sampling_rate: float = 4.0,
-        detrend_method: Optional[str] = "linear",
+        detrend_method: Optional[str] = None,
         detrend_lambda: float = 500,
         window_type: str = "hann",
         segment_length: float = 120.0,
@@ -296,9 +296,15 @@ class HRVFreqDomainAnalysis:
             freqs = np.fft.rfftfreq(n, d=1.0 / self.sampling_rate)
 
             # Compute PSD (periodogram) in seconds^2/Hz
-            # Scale factor accounts for windowing and sampling
-            window_power = np.sum(window**2)
-            psd_seconds = (np.abs(fft_result) ** 2) / (self.sampling_rate * window_power)
+            # Proper scaling for one-sided PSD with windowing
+            # Reference: Heinzel et al. "Spectrum and spectral density estimation by the DFT"
+            S2 = np.sum(window**2) / n  # Window power normalization factor
+            psd_seconds = (2.0 / (self.sampling_rate * n * S2)) * (np.abs(fft_result) ** 2)
+
+            # Correct DC and Nyquist components (should not be doubled)
+            psd_seconds[0] /= 2.0
+            if n % 2 == 0 and len(psd_seconds) > 1:
+                psd_seconds[-1] /= 2.0
 
             # Convert to ms^2/Hz
             psd_ms2 = psd_seconds * 1e6
@@ -575,7 +581,7 @@ class HRVFreqDomainAnalysis:
             return default_results
 
         try:
-            total_power = np.trapz(psd, freqs)
+            total_power = np.trapezoid(psd, freqs)
             if total_power <= 0:
                 warnings.warn("Total power is zero or negative. Returning defaults.")
                 return default_results
@@ -604,7 +610,7 @@ class HRVFreqDomainAnalysis:
                 band_power = 0.0
             else:
                 try:
-                    band_power = np.trapz(psd[mask], freqs[mask])
+                    band_power = np.trapezoid(psd[mask], freqs[mask])
                     band_power = max(0.0, band_power)
                 except Exception as e:
                     warnings.warn(f"Power calculation failed for {band} band: {e}")
