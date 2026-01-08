@@ -267,8 +267,10 @@ class TimeDomainWidget(MetricSectionWidget):
             ("rmssd", "RMSSD", "ms"),
             ("pnn50", "pNN50", "%"),
             ("pnn20", "pNN20", "%"),
+            ("nn50", "NN50", ""),
             ("mean_rr", "Mean RR", "ms"),
             ("mean_hr", "Mean HR", "bpm"),
+            ("std_hr", "STD HR", "1/min"),
             ("cvnn", "CV", ""),
             ("hrv_triangular_index", "HRV Triangular Index", ""),
             ("tinn", "TINN", "ms"),
@@ -393,6 +395,7 @@ class FrequencyDomainWidget(MetricSectionWidget):
             ("lf_power", "LF Power", "ms²", 2),
             ("hf_power", "HF Power", "ms²", 2),
             ("total_power", "Total Power", "ms²", 2),
+            ("peak_freq_vlf", "VLF Peak Freq", "Hz", 3),
             ("peak_freq_lf", "LF Peak Freq", "Hz", 3),
             ("peak_freq_hf", "HF Peak Freq", "Hz", 3),
             ("vlf_power_nu", "VLF (%)", "%", 1),
@@ -575,13 +578,17 @@ class NonlinearWidget(MetricSectionWidget):
             self.main_layout.addWidget(dfa_widget)
 
         # Sample Entropy
-        if "sample_entropy" in nonlinear_data:
-            entropy_data = {"sample_entropy": nonlinear_data["sample_entropy"]}
+        if "sample_entropy" in nonlinear_data or "approximate_entropy" in nonlinear_data:
+            entropy_data = {
+                "sample_entropy": nonlinear_data.get("sample_entropy"),
+                "approximate_entropy": nonlinear_data.get("approximate_entropy"),
+            }
             entropy_widget = self.create_subsection(
                 "Entropy Analysis",
                 entropy_data,
                 [
                     ("sample_entropy", "Sample Entropy", ""),
+                    ("approximate_entropy", "Approximate Entropy", ""),
                 ],
             )
             self.main_layout.addWidget(entropy_widget)

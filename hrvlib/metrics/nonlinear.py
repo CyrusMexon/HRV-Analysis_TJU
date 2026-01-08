@@ -1,8 +1,5 @@
 import numpy as np
-import scipy.stats
-import scipy.spatial
-import scipy.special
-from typing import Tuple, Optional, List, Dict, Union
+from typing import Tuple, Optional, Dict, Union
 import warnings
 
 # Import from existing modules to maintain consistency
@@ -12,7 +9,7 @@ from hrvlib.preprocessing import PreprocessingResult
 class NonlinearHRVAnalysis:
     """
     Nonlinear HRV analysis toolkit
-    Implements Poincaré analysis, Sample Entropy, Multiscale Entropy, DFA and RQA
+    Implements Poincaré analysis, Sample Entropy, Multiscale Entropy, and DFA
     Expects preprocessed data from the pipeline - no internal preprocessing
     Meets research and enterprise-level accuracy requirements
     """
@@ -211,6 +208,59 @@ class NonlinearHRVAnalysis:
 
         return -np.log(phi_m_plus_1 / phi_m)
 
+    def approximate_entropy(
+        self, m: int = 2, r: float = 0.2, normalize: bool = True
+    ) -> float:
+        """
+        Calculate Approximate Entropy (ApEn) of RR interval series.
+
+        Args:
+            m: Template length (typically 2)
+            r: Tolerance coefficient (typically 0.2)
+            normalize: Whether to normalize data (use relative tolerance)
+
+        Returns:
+            Approximate entropy value
+        """
+        if len(self.rr_ms) < m + 2:
+            raise ValueError("Approximate entropy requires more data points")
+        if m < 1:
+            raise ValueError("Template length m must be at least 1")
+        if r <= 0:
+            raise ValueError("Tolerance r must be positive")
+
+        rr_clean = self.rr_ms.copy()
+
+        # Normalize data if requested
+        if normalize:
+            std = np.std(rr_clean, ddof=1)
+            if std < 1e-10:
+                return 0.0
+            rr_norm = (rr_clean - np.mean(rr_clean)) / std
+            tolerance = r
+        else:
+            rr_norm = rr_clean.copy()
+            tolerance = r * np.std(rr_clean, ddof=1)
+
+        n = len(rr_norm)
+
+        def _phi(m_len: int) -> float:
+            patterns = np.array([rr_norm[i : i + m_len] for i in range(n - m_len + 1)])
+            count = np.zeros(n - m_len + 1)
+            for i in range(n - m_len + 1):
+                template = patterns[i]
+                distances = np.max(np.abs(patterns - template), axis=1)
+                count[i] = np.sum(distances <= tolerance)
+            # Avoid log(0)
+            C = count / (n - m_len + 1)
+            C = np.where(C > 0, C, 1e-12)
+            return np.mean(np.log(C))
+
+        phi_m = _phi(m)
+        phi_m_plus_1 = _phi(m + 1)
+
+        return float(phi_m - phi_m_plus_1)
+
     def multiscale_entropy(
         self, scale_max: int = 10, m: int = 2, r: float = 0.15
     ) -> np.ndarray:
@@ -270,25 +320,37 @@ class NonlinearHRVAnalysis:
         Returns:
             Tuple of (alpha1, alpha2, box_sizes, fluctuations)
         """
-        if len(self.rr_ms) < 100:
-            raise ValueError("DFA calculation requires at least 100 data points")
-
         rr_clean = self.rr_ms.copy()
         n = len(rr_clean)
+        short_series = n < 100
+        if short_series and n < 40:
+            raise ValueError("DFA calculation requires at least 40 data points")
 
         # Step 1: Integrate the signal (cumulative sum of deviations from mean)
         y = np.cumsum(rr_clean - np.mean(rr_clean))
 
         # Step 2: Create box sizes (logarithmic scale)
         min_box_size = 4
-        max_box_size = min(n // 4, 64)  # Limit maximum box size
+        if short_series:
+            max_box_size = max(8, min(n // 4, 32))
+            num_boxes = 8
+        else:
+            max_box_size = min(n // 4, 64)
+            num_boxes = 12
+
+        if max_box_size <= min_box_size:
+            max_box_size = min_box_size + 1
+
         box_sizes = np.unique(
             np.logspace(
-                np.log10(min_box_size), np.log10(max_box_size), num=12, dtype=int
+                np.log10(min_box_size), np.log10(max_box_size), num=num_boxes, dtype=int
             )
         )
+        if len(box_sizes) < 4:
+            box_sizes = np.arange(min_box_size, max_box_size + 1, dtype=int)
 
         fluctuations = []
+        valid_box_sizes = []
 
         # Step 3: Calculate fluctuations for each box size
         for box_size in box_sizes:
@@ -318,22 +380,22 @@ class NonlinearHRVAnalysis:
             # Average fluctuation
             fluctuation = np.sqrt(f_squared / (n_boxes * box_size))
             fluctuations.append(fluctuation)
+            valid_box_sizes.append(box_size)
 
         fluctuations = np.array(fluctuations)
+        valid_box_sizes = np.array(valid_box_sizes)
 
         # Step 4: Calculate scaling exponents
         if len(fluctuations) < 4:
-            return np.nan, np.nan, box_sizes, fluctuations
+            return np.nan, np.nan, valid_box_sizes, fluctuations
 
-        log_box_sizes = np.log(box_sizes[: len(fluctuations)])
+        log_box_sizes = np.log(valid_box_sizes)
         log_fluctuations = np.log(fluctuations)
 
         # Short-term scaling exponent (typically 4-11 beats)
-        short_term_mask = (box_sizes[: len(fluctuations)] >= 4) & (
-            box_sizes[: len(fluctuations)] <= 11
-        )
+        short_term_mask = (valid_box_sizes >= 4) & (valid_box_sizes <= 11)
         # Long-term scaling exponent (typically > 11 beats)
-        long_term_mask = box_sizes[: len(fluctuations)] > 11
+        long_term_mask = valid_box_sizes > 11
 
         alpha1 = np.nan
         alpha2 = np.nan
@@ -354,186 +416,13 @@ class NonlinearHRVAnalysis:
             except:
                 alpha2 = np.nan
 
-        return alpha1, alpha2, box_sizes[: len(fluctuations)], fluctuations
-
-    def recurrence_quantification_analysis(
-        self,
-        threshold: float = 0.1,
-        embedding_dim: int = 3,
-        delay: int = 1,
-        min_line_length: int = 2,
-    ) -> Dict[str, Union[float, int]]:
-        """
-        Recurrence Quantification Analysis (RQA)
-
-        Args:
-            threshold: Recurrence threshold (as fraction of max distance)
-            embedding_dim: Embedding dimension
-            delay: Time delay
-            min_line_length: Minimum line length for determinism calculation
-
-        Returns:
-            Dictionary of RQA metrics
-        """
-        if len(self.rr_ms) < 50:
-            raise ValueError("RQA calculation requires at least 50 data points")
-
-        rr_clean = self.rr_ms.copy()
-        n = len(rr_clean)
-
-        # Phase space reconstruction
-        m = embedding_dim
-        tau = delay
-        embedded_length = n - (m - 1) * tau
-
-        if embedded_length < 10:
-            raise ValueError("Insufficient data for phase space reconstruction")
-
-        embedded = np.zeros((embedded_length, m))
-        for i in range(embedded_length):
-            for j in range(m):
-                embedded[i, j] = rr_clean[i + j * tau]
-
-        # Calculate distance matrix
-        dist_matrix = scipy.spatial.distance_matrix(embedded, embedded)
-
-        # Set recurrence threshold
-        if threshold <= 1.0:  # Relative threshold
-            max_dist = np.max(dist_matrix)
-            recurrence_threshold = threshold * max_dist
-        else:  # Absolute threshold
-            recurrence_threshold = threshold
-
-        # Create recurrence matrix
-        recurrence_matrix = (dist_matrix <= recurrence_threshold).astype(int)
-
-        # Remove main diagonal (self-recurrences)
-        np.fill_diagonal(recurrence_matrix, 0)
-
-        N = recurrence_matrix.shape[0]
-        total_points = N * N
-
-        # Calculate basic RQA measures
-        total_recurrent_points = np.sum(recurrence_matrix)
-
-        # Recurrence Rate (RR)
-        recurrence_rate = (
-            total_recurrent_points / total_points if total_points > 0 else 0.0
-        )
-
-        # Find diagonal lines (determinism)
-        diagonal_lines = []
-        visited = np.zeros_like(recurrence_matrix, dtype=bool)
-
-        for i in range(N):
-            for j in range(N):
-                if recurrence_matrix[i, j] and not visited[i, j]:
-                    # Check diagonal line starting from (i, j)
-                    k = 0
-                    while (
-                        i + k < N
-                        and j + k < N
-                        and recurrence_matrix[i + k, j + k]
-                        and not visited[i + k, j + k]
-                    ):
-                        visited[i + k, j + k] = True
-                        k += 1
-
-                    if k >= min_line_length:
-                        diagonal_lines.append(k)
-
-        # Determinism (DET)
-        if diagonal_lines:
-            diagonal_points = sum(diagonal_lines)
-            determinism = (
-                diagonal_points / total_recurrent_points
-                if total_recurrent_points > 0
-                else 0.0
-            )
-            avg_diagonal_length = float(np.mean(diagonal_lines))
-            max_diagonal_length = float(max(diagonal_lines))
-        else:
-            determinism = 0.0
-            avg_diagonal_length = 0.0
-            max_diagonal_length = 0.0
-
-        # Find vertical lines (laminarity)
-        vertical_lines = []
-        visited_vertical = np.zeros_like(recurrence_matrix, dtype=bool)
-
-        for j in range(N):
-            i = 0
-            while i < N:
-                if recurrence_matrix[i, j] and not visited_vertical[i, j]:
-                    k = 0
-                    while (
-                        i + k < N
-                        and recurrence_matrix[i + k, j]
-                        and not visited_vertical[i + k, j]
-                    ):
-                        visited_vertical[i + k, j] = True
-                        k += 1
-
-                    if k >= min_line_length:
-                        vertical_lines.append(k)
-                    i += k
-                else:
-                    i += 1
-
-        # Laminarity (LAM)
-        if vertical_lines:
-            vertical_points = sum(vertical_lines)
-            laminarity = (
-                vertical_points / total_recurrent_points
-                if total_recurrent_points > 0
-                else 0.0
-            )
-            avg_vertical_length = float(np.mean(vertical_lines))
-            max_vertical_length = float(max(vertical_lines))
-        else:
-            laminarity = 0.0
-            avg_vertical_length = 0.0
-            max_vertical_length = 0.0
-
-        return {
-            "recurrence_rate": float(recurrence_rate),
-            "determinism": float(determinism),
-            "avg_diagonal_length": avg_diagonal_length,
-            "max_diagonal_length": max_diagonal_length,
-            "laminarity": float(laminarity),
-            "avg_vertical_length": avg_vertical_length,
-            "max_vertical_length": max_vertical_length,
-            "entropy_diagonal": float(
-                -np.sum(
-                    [
-                        p * np.log(p)
-                        for p in np.bincount(diagonal_lines) / len(diagonal_lines)
-                        if p > 0
-                    ]
-                )
-                if diagonal_lines
-                else 0.0
-            ),
-            "entropy_vertical": float(
-                -np.sum(
-                    [
-                        p * np.log(p)
-                        for p in np.bincount(vertical_lines) / len(vertical_lines)
-                        if p > 0
-                    ]
-                )
-                if vertical_lines
-                else 0.0
-            ),
-        }
+        return alpha1, alpha2, valid_box_sizes, fluctuations
 
     def full_nonlinear_analysis(
         self,
         include_mse: bool = True,
         include_dfa: bool = True,
-        include_rqa: bool = True,
         mse_scales: int = 10,
-        rqa_params: Optional[Dict] = None,
     ) -> Dict[str, Union[float, np.ndarray, Dict, None]]:
         """
         Perform complete nonlinear HRV analysis
@@ -541,9 +430,7 @@ class NonlinearHRVAnalysis:
         Args:
             include_mse: Whether to calculate multiscale entropy
             include_dfa: Whether to calculate DFA
-            include_rqa: Whether to calculate RQA
             mse_scales: Number of scales for MSE
-            rqa_params: Parameters for RQA analysis
 
         Returns:
             Comprehensive nonlinear analysis results
@@ -567,9 +454,22 @@ class NonlinearHRVAnalysis:
         try:
             sampen = self.sample_entropy()
             results["sample_entropy"] = sampen
+            results["sampen"] = sampen
         except Exception as e:
             warnings.warn(f"Sample entropy calculation failed: {e}")
             results["sample_entropy"] = None
+            results["sampen"] = None
+
+        # Approximate Entropy
+        try:
+            apen = self.approximate_entropy()
+            results["approximate_entropy"] = apen
+            results["apen"] = apen
+        except Exception as e:
+            warnings.warn(f"Approximate entropy calculation failed: {e}")
+            results["approximate_entropy"] = None
+            results["apen"] = None
+
 
         # Multiscale Entropy
         if include_mse:
@@ -607,18 +507,6 @@ class NonlinearHRVAnalysis:
                 results["dfa"] = None
         else:
             results["dfa"] = None
-
-        # Recurrence Quantification Analysis
-        if include_rqa:
-            try:
-                rqa_params = rqa_params or {}
-                rqa_metrics = self.recurrence_quantification_analysis(**rqa_params)
-                results["rqa"] = rqa_metrics
-            except Exception as e:
-                warnings.warn(f"RQA calculation failed: {e}")
-                results["rqa"] = None
-        else:
-            results["rqa"] = None
 
         # Analysis metadata
         results["analysis_info"] = {

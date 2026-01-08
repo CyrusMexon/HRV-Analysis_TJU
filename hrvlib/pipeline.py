@@ -126,7 +126,6 @@ class UnifiedHRVPipeline:
                 "enabled": True,
                 "include_mse": True,
                 "include_dfa": True,
-                "include_rqa": True,
                 "mse_scales": 10,
                 "analysis_window": None,
             },
@@ -268,7 +267,6 @@ class UnifiedHRVPipeline:
             return analyzer.full_nonlinear_analysis(
                 include_mse=config.get("include_mse", True),
                 include_dfa=config.get("include_dfa", True),
-                include_rqa=config.get("include_rqa", True),
                 mse_scales=config.get("mse_scales", 10),
             )
 

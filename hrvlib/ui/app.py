@@ -33,7 +33,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("HRV Studio v1.0")
+        self.setWindowTitle("HRV Studio V1.0")
         self.resize(1400, 900)
 
         # Data storage
@@ -353,20 +353,20 @@ class HRVMainWindow(QtWidgets.QMainWindow):
             )
 
             # Update window title to indicate quality issue
-            self.setWindowTitle("HRV Studio v1.0 - ⚠️ QUALITY WARNING: >5% corrected")
+            self.setWindowTitle("HRV Studio V1.0 - ⚠️ QUALITY WARNING: >5% corrected")
 
         elif corrected_percentage > 2.0:
             self.statusBar().showMessage(
                 f"Quality: {corrected_percentage:.1f}% beats corrected - Monitor quality"
             )
-            self.setWindowTitle("HRV Studio v1.0 - Manual editing active")
+            self.setWindowTitle("HRV Studio V1.0 - Manual editing active")
         elif corrected_percentage > 0:
             self.statusBar().showMessage(
                 f"Quality: {corrected_percentage:.1f}% beats corrected - Good quality"
             )
-            self.setWindowTitle("HRV Studio v1.0 - Manual editing active")
+            self.setWindowTitle("HRV Studio V1.0 - Manual editing active")
         else:
-            self.setWindowTitle("HRV Studio v1.0")
+            self.setWindowTitle("HRV Studio V1.0")
 
     def on_reanalysis_requested(self):
         """Handle reanalysis requests after editing"""

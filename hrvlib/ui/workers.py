@@ -190,7 +190,6 @@ class PipelineWorker(QObject):
                 "enabled": True,
                 "include_mse": True,
                 "include_dfa": True,
-                "include_rqa": True,
                 "mse_scales": 10,
                 "analysis_window": analysis_window,
             },

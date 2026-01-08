@@ -102,13 +102,36 @@ def plot_dfa_analysis(ax, nonlinear: dict):
             box_sizes = dfa_data.get("box_sizes")
             fluctuations = dfa_data.get("fluctuations")
 
-    # If no DFA data available
-    if dfa_data is None or (dfa_alpha1 is None and dfa_alpha2 is None):
+    has_alpha1 = dfa_alpha1 is not None and np.isfinite(dfa_alpha1)
+    has_alpha2 = dfa_alpha2 is not None and np.isfinite(dfa_alpha2)
+
+    valid_boxes = None
+    valid_flucts = None
+
+    if (
+        box_sizes is not None
+        and fluctuations is not None
+        and len(box_sizes) == len(fluctuations)
+    ):
+        valid_mask = (
+            (box_sizes > 0)
+            & (fluctuations > 0)
+            & np.isfinite(box_sizes)
+            & np.isfinite(fluctuations)
+        )
+        if np.any(valid_mask):
+            valid_boxes = box_sizes[valid_mask]
+            valid_flucts = fluctuations[valid_mask]
+
+    has_curve = valid_boxes is not None
+
+    # If no DFA data available or nothing valid to plot
+    if dfa_data is None or (not has_alpha1 and not has_alpha2 and not has_curve):
         ax.set_title("DFA Analysis - No Data")
         ax.text(
             0.5,
             0.5,
-            "DFA analysis not available\nor not computed",
+            "DFA analysis not available or insufficient data\n(requires >= 40 RR intervals)",
             ha="center",
             va="center",
             transform=ax.transAxes,
@@ -120,95 +143,66 @@ def plot_dfa_analysis(ax, nonlinear: dict):
         return
 
     # Plot actual DFA curve if we have the raw data
-    if (
-        box_sizes is not None
-        and fluctuations is not None
-        and len(box_sizes) == len(fluctuations)
-    ):
-        # Filter out any invalid values
-        valid_mask = (
-            (box_sizes > 0)
-            & (fluctuations > 0)
-            & np.isfinite(box_sizes)
-            & np.isfinite(fluctuations)
+    if has_curve:
+        ax.loglog(
+            valid_boxes,
+            valid_flucts,
+            "bo-",
+            markersize=4,
+            linewidth=1,
+            label="DFA curve",
+            alpha=0.7,
         )
 
-        if np.any(valid_mask):
-            valid_boxes = box_sizes[valid_mask]
-            valid_flucts = fluctuations[valid_mask]
+        # Add trend lines for alpha1 and alpha2 if available
+        if has_alpha1:
+            # Short-term scaling (typically 4-11 beats)
+            short_mask = (valid_boxes >= 4) & (valid_boxes <= 11)
+            if np.any(short_mask):
+                short_boxes = valid_boxes[short_mask]
+                if len(short_boxes) > 0:
+                    # Create trend line
+                    trend_boxes = np.linspace(short_boxes.min(), short_boxes.max(), 20)
+                    trend_flucts = trend_boxes**dfa_alpha1 * np.exp(
+                        np.log(valid_flucts[short_mask][0])
+                        - dfa_alpha1 * np.log(short_boxes[0])
+                    )
+                    ax.loglog(
+                        trend_boxes,
+                        trend_flucts,
+                        "g-",
+                        linewidth=2,
+                        label=f"alpha1={dfa_alpha1:.3f}",
+                    )
 
-            ax.loglog(
-                valid_boxes,
-                valid_flucts,
-                "bo-",
-                markersize=4,
-                linewidth=1,
-                label="DFA curve",
-                alpha=0.7,
-            )
-
-            # Add trend lines for alpha1 and alpha2 if available
-            if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
-                # Short-term scaling (typically 4-11 beats)
-                short_mask = (valid_boxes >= 4) & (valid_boxes <= 11)
-                if np.any(short_mask):
-                    short_boxes = valid_boxes[short_mask]
-                    if len(short_boxes) > 0:
-                        # Create trend line
-                        trend_boxes = np.linspace(
-                            short_boxes.min(), short_boxes.max(), 20
-                        )
-                        trend_flucts = trend_boxes**dfa_alpha1 * np.exp(
-                            np.log(valid_flucts[short_mask][0])
-                            - dfa_alpha1 * np.log(short_boxes[0])
-                        )
-                        ax.loglog(
-                            trend_boxes,
-                            trend_flucts,
-                            "g-",
-                            linewidth=2,
-                            label=f"α₁={dfa_alpha1:.3f}",
-                        )
-
-            if dfa_alpha2 is not None and not np.isnan(dfa_alpha2):
-                # Long-term scaling (>11 beats)
-                long_mask = valid_boxes > 11
-                if np.any(long_mask):
-                    long_boxes = valid_boxes[long_mask]
-                    if len(long_boxes) > 0:
-                        # Create trend line
-                        trend_boxes = np.linspace(
-                            long_boxes.min(), long_boxes.max(), 20
-                        )
-                        trend_flucts = trend_boxes**dfa_alpha2 * np.exp(
-                            np.log(valid_flucts[long_mask][0])
-                            - dfa_alpha2 * np.log(long_boxes[0])
-                        )
-                        ax.loglog(
-                            trend_boxes,
-                            trend_flucts,
-                            "r-",
-                            linewidth=2,
-                            label=f"α₂={dfa_alpha2:.3f}",
-                        )
-        else:
-            # Fallback to synthetic curves if data is invalid
-            scales = np.logspace(0.6, 1.8, 20)  # 4 to 64 beats
-            if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
-                f1 = scales**dfa_alpha1
-                ax.loglog(scales, f1, "g-", lw=2, label=f"α₁={dfa_alpha1:.3f}")
-            if dfa_alpha2 is not None and not np.isnan(dfa_alpha2):
-                f2 = scales**dfa_alpha2 * 2
-                ax.loglog(scales, f2, "r-", lw=2, label=f"α₂={dfa_alpha2:.3f}")
+        if has_alpha2:
+            # Long-term scaling (>11 beats)
+            long_mask = valid_boxes > 11
+            if np.any(long_mask):
+                long_boxes = valid_boxes[long_mask]
+                if len(long_boxes) > 0:
+                    # Create trend line
+                    trend_boxes = np.linspace(long_boxes.min(), long_boxes.max(), 20)
+                    trend_flucts = trend_boxes**dfa_alpha2 * np.exp(
+                        np.log(valid_flucts[long_mask][0])
+                        - dfa_alpha2 * np.log(long_boxes[0])
+                    )
+                    ax.loglog(
+                        trend_boxes,
+                        trend_flucts,
+                        "r-",
+                        linewidth=2,
+                        label=f"alpha2={dfa_alpha2:.3f}",
+                    )
     else:
         # Fallback to synthetic curves if no raw data available
         scales = np.logspace(0.6, 1.8, 20)  # 4 to 64 beats
-        if dfa_alpha1 is not None and not np.isnan(dfa_alpha1):
+        if has_alpha1:
             f1 = scales**dfa_alpha1
-            ax.loglog(scales, f1, "g-", lw=2, label=f"α₁={dfa_alpha1:.3f}")
-        if dfa_alpha2 is not None and not np.isnan(dfa_alpha2):
+            ax.loglog(scales, f1, "g-", lw=2, label=f"alpha1={dfa_alpha1:.3f}")
+        if has_alpha2:
             f2 = scales**dfa_alpha2 * 2
-            ax.loglog(scales, f2, "r-", lw=2, label=f"α₂={dfa_alpha2:.3f}")
+            ax.loglog(scales, f2, "r-", lw=2, label=f"alpha2={dfa_alpha2:.3f}")
 
     ax.set_xlabel("Window size (beats)")
     ax.set_ylabel("Fluctuation function")

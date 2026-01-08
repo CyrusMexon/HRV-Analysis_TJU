@@ -213,6 +213,17 @@ class HRVExporter:
                     if isinstance(value, (int, float)):
                         nonlinear_metrics.append([f"DFA {metric}", f"{value:.3f}", ""])
 
+            # Entropy metrics
+            if "sample_entropy" in self.results.nonlinear:
+                value = self.results.nonlinear["sample_entropy"]
+                if isinstance(value, (int, float)):
+                    nonlinear_metrics.append(["Sample Entropy", f"{value:.3f}", ""])
+
+            if "approximate_entropy" in self.results.nonlinear:
+                value = self.results.nonlinear["approximate_entropy"]
+                if isinstance(value, (int, float)):
+                    nonlinear_metrics.append(["Approximate Entropy", f"{value:.3f}", ""])
+
             if nonlinear_metrics:
                 table3 = axes[2].table(
                     cellText=nonlinear_metrics[:8],
@@ -429,6 +440,11 @@ class HRVExporter:
                 if isinstance(value, (int, float)):
                     metrics_data["sample_entropy"] = round(value, decimal_places)
 
+            if "approximate_entropy" in self.results.nonlinear:
+                value = self.results.nonlinear["approximate_entropy"]
+                if isinstance(value, (int, float)):
+                    metrics_data["approximate_entropy"] = round(value, decimal_places)
+
         # Quality metrics
         if self.results.preprocessing_stats:
             metrics_data["artifacts_detected"] = self.results.preprocessing_stats.get(
@@ -465,8 +481,10 @@ class HRVExporter:
                 "sdnn": "SDNN_ms",
                 "rmssd": "RMSSD_ms",
                 "pnn50": "pNN50_pct",
+                "nn50": "NN50_count",
                 "mean_rr": "MeanRR_ms",
                 "mean_hr": "MeanHR_bpm",
+                "std_hr": "STDHR_bpm",
             }
 
             for key, value in self.results.time_domain.items():
@@ -591,7 +609,7 @@ class HRVExporter:
             return "ms"
         elif any(x in metric_lower for x in ["hr", "heart_rate"]):
             return "bpm"
-        elif any(x in metric_lower for x in ["pnn", "percentage"]):
+        elif any(x in metric_lower for x in ["pnn", "percentage", "pct"]):
             return "%"
         elif "power" in metric_lower:
             return "ms²"
@@ -614,6 +632,8 @@ class HRVExporter:
             "Vlf": "VLF",
             "Lf": "LF",
             "Hf": "HF",
+            "Apen": "ApEn",
+            "Sampen": "SampEn",
         }
 
         for old, new in replacements.items():

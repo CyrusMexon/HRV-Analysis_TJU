@@ -49,6 +49,30 @@ def detrend_with_smoothness_priors(
     return detrended
 
 
+def detrend_uniform_with_smoothness_priors(
+    signal_uniform, lambda_param=500, return_trend=False
+):
+    """
+    Simplified interface for smoothness priors on uniformly sampled signals.
+
+    Parameters
+    ----------
+    signal_uniform : array-like
+        Uniformly sampled signal (any units)
+    lambda_param : float, optional (default=500)
+        Smoothness parameter
+    return_trend : bool, optional (default=False)
+        If True, return both detrended signal and trend
+    """
+    detrended, trend = smoothness_priors_detrending_uniform(
+        signal_uniform, lambda_param=lambda_param
+    )
+
+    if return_trend:
+        return detrended, trend
+    return detrended
+
+
 def smoothness_priors_detrending(rr_intervals, lambda_param=500, fs=4.0):
     """
     Apply smoothness priors detrending to RR interval time series.
@@ -144,6 +168,44 @@ def smoothness_priors_detrending(rr_intervals, lambda_param=500, fs=4.0):
     detrended = rr_intervals - trend_original
 
     return detrended, trend_original
+
+
+def smoothness_priors_detrending_uniform(signal_uniform, lambda_param=500):
+    """
+    Apply smoothness priors detrending to a uniformly sampled signal.
+
+    Parameters
+    ----------
+    signal_uniform : array-like
+        Uniformly sampled signal (any units)
+    lambda_param : float, optional (default=500)
+        Smoothness parameter
+
+    Returns
+    -------
+    detrended : numpy.ndarray
+        Detrended signal (same length as input)
+    trend : numpy.ndarray
+        Estimated trend component
+    """
+    y = np.asarray(signal_uniform, dtype=float)
+
+    if len(y) < 4:
+        raise ValueError("Need at least 4 samples for smoothness priors detrending")
+
+    if lambda_param <= 0:
+        raise ValueError("Lambda parameter must be positive")
+
+    N = len(y)
+    identity = sparse.eye(N)
+    D2 = sparse.diags([1, -2, 1], [0, 1, 2], shape=(N - 2, N))
+    H = identity + lambda_param**2 * D2.T @ D2
+    H = H.tocsr()
+
+    trend = spsolve(H, y)
+    detrended = y - trend
+
+    return detrended, trend
 
 
 def choose_lambda_for_hrv(analysis_type="standard"):

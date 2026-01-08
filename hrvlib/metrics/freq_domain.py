@@ -1,12 +1,14 @@
 import numpy as np
-from scipy import signal, interpolate
+from scipy import signal, interpolate, linalg
 from typing import Tuple, Dict, Optional, Union
 import warnings
 
 # Keep this import (you had it in the original file).
 from hrvlib.preprocessing import PreprocessingResult
 
-from hrvlib.signal_processing.smoothness_priors import detrend_with_smoothness_priors
+from hrvlib.signal_processing.smoothness_priors import (
+    detrend_uniform_with_smoothness_priors,
+)
 
 
 class HRVFreqDomainAnalysis:
@@ -35,7 +37,7 @@ class HRVFreqDomainAnalysis:
     VALID_DETRENDS = ["linear", "constant", "smoothness_priors", None]
     DEFAULT_FREQ_BANDS = {
         "ulf": (0.0, 0.003),
-        "vlf": (0.003, 0.04),
+        "vlf": (0.0, 0.04),
         "lf": (0.04, 0.15),
         "hf": (0.15, 0.4),
         "lf_hf_ratio": (0.04, 0.4),
@@ -52,6 +54,9 @@ class HRVFreqDomainAnalysis:
         segment_length: float = 120.0,
         overlap_ratio: float = 0.75,
         ar_order: int = 16,
+        clip_rr_resampled: bool = True,
+        rr_clip_range: Tuple[float, float] = (0.2, 3.0),
+        welch_shorten_if_short: bool = True,
         analysis_window: Optional[Tuple[float, float]] = None,
     ):
         self.rr_intervals_ms = np.array(preprocessed_rri, dtype=float)
@@ -63,9 +68,30 @@ class HRVFreqDomainAnalysis:
         self.segment_length = float(segment_length)
         self.overlap_ratio = float(overlap_ratio)
         self.ar_order = int(ar_order)
+        self.clip_rr_resampled = bool(clip_rr_resampled)
+        self.rr_clip_range = tuple(rr_clip_range)
+        self.welch_shorten_if_short = bool(welch_shorten_if_short)
         self.analysis_window = analysis_window
 
         self._validate_input()
+
+        # Auto-detect RR units (seconds vs milliseconds vs microseconds).
+        mean_rr = np.mean(self.rr_intervals_ms) if self.rr_intervals_ms.size else 0.0
+        if mean_rr > 0:
+            if mean_rr < 10:
+                warnings.warn(
+                    f"RR intervals appear to be in seconds (mean={mean_rr:.3f}s); converting to ms."
+                )
+                self.rr_intervals_ms = self.rr_intervals_ms * 1000.0
+            elif mean_rr > 10000:
+                warnings.warn(
+                    f"RR intervals appear to be in microseconds (mean={mean_rr:.0f}us); converting to ms."
+                )
+                self.rr_intervals_ms = self.rr_intervals_ms / 1000.0
+            elif not (200 < mean_rr < 3000):
+                warnings.warn(
+                    f"RR intervals mean ({mean_rr:.2f}) is unusual for ms; verify input units."
+                )
 
         if self.analysis_window is not None:
             self.rr_intervals_ms = self._apply_analysis_window(self.rr_intervals_ms)
@@ -83,7 +109,24 @@ class HRVFreqDomainAnalysis:
             warnings.warn("Empty RR input received.")
 
         # Create time domain signal in seconds (RR_s)
-        self.time_domain_s = self._create_time_domain_signal()
+        self.time_domain_s = self._create_time_domain_signal(
+            rr_values_ms=self.rr_intervals_ms,
+            clip_rr=self.clip_rr_resampled,
+            clip_range=self.rr_clip_range,
+        )
+        self._smoothness_priors_applied = False
+        if self.detrend_method == "smoothness_priors":
+            try:
+                self.time_domain_s = detrend_uniform_with_smoothness_priors(
+                    self.time_domain_s,
+                    lambda_param=self.detrend_lambda,
+                    return_trend=False,
+                )
+                self._smoothness_priors_applied = True
+            except Exception as e:
+                warnings.warn(
+                    f"Smoothness priors detrending failed on resampled signal: {e}. Falling back to linear detrend."
+                )
 
         # Compute Welch PSD
         self.freqs, self.psd = self._compute_welch_psd()
@@ -112,6 +155,15 @@ class HRVFreqDomainAnalysis:
             raise ValueError("Segment length must be positive")
         if not (0 <= self.overlap_ratio < 1):
             raise ValueError("Overlap ratio must be in [0,1) range")
+        if self.clip_rr_resampled:
+            if (
+                not isinstance(self.rr_clip_range, tuple)
+                or len(self.rr_clip_range) != 2
+            ):
+                raise ValueError("rr_clip_range must be a (min, max) tuple")
+            clip_min, clip_max = self.rr_clip_range
+            if clip_min <= 0 or clip_max <= 0 or clip_min >= clip_max:
+                raise ValueError("rr_clip_range must be positive and min < max")
 
     def _apply_analysis_window(self, rr_ms: np.ndarray) -> np.ndarray:
         start_time, end_time = self.analysis_window
@@ -125,12 +177,25 @@ class HRVFreqDomainAnalysis:
             )
         return rr_ms[mask]
 
-    def _create_time_domain_signal(self) -> np.ndarray:
-        if len(self.rr_intervals_ms) == 0:
+    def _create_time_domain_signal(
+        self,
+        rr_values_ms: np.ndarray,
+        rr_time_ms: Optional[np.ndarray] = None,
+        clip_rr: bool = True,
+        clip_range: Tuple[float, float] = (0.2, 3.0),
+    ) -> np.ndarray:
+        if len(rr_values_ms) == 0:
             return np.array([])
 
-        rr_s = self.rr_intervals_ms.astype(float) / 1000.0
-        time_points = np.cumsum(rr_s)
+        rr_values_s = rr_values_ms.astype(float) / 1000.0
+        if rr_time_ms is None:
+            rr_time_s = rr_values_s
+        else:
+            if len(rr_time_ms) != len(rr_values_ms):
+                raise ValueError("rr_time_ms and rr_values_ms must be the same length")
+            rr_time_s = rr_time_ms.astype(float) / 1000.0
+
+        time_points = np.cumsum(rr_time_s)
         time_points = np.concatenate([[0.0], time_points[:-1]])
 
         duration = time_points[-1]
@@ -144,14 +209,16 @@ class HRVFreqDomainAnalysis:
             )
 
         try:
-            interp_func = interpolate.CubicSpline(time_points, rr_s, bc_type="natural")
+            interp_func = interpolate.CubicSpline(
+                time_points, rr_values_s, bc_type="natural"
+            )
         except Exception as e:
             warnings.warn(
                 f"Cubic spline interpolation failed: {e}. Falling back to linear."
             )
             interp_func = interpolate.interp1d(
                 time_points,
-                rr_s,
+                rr_values_s,
                 kind="linear",
                 bounds_error=False,
                 fill_value="extrapolate",
@@ -165,7 +232,8 @@ class HRVFreqDomainAnalysis:
             )
 
         resampled_rr_s = interp_func(new_time_axis)
-        resampled_rr_s = np.clip(resampled_rr_s, 0.2, 3.0)
+        if clip_rr:
+            resampled_rr_s = np.clip(resampled_rr_s, clip_range[0], clip_range[1])
         return resampled_rr_s
 
     def _compute_welch_psd(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -174,6 +242,11 @@ class HRVFreqDomainAnalysis:
 
         requested = int(self.segment_length * self.sampling_rate)
         nperseg = min(requested, len(self.time_domain_s))
+
+        # Optionally shorten when recording is shorter than requested window.
+        if self.welch_shorten_if_short and nperseg == len(self.time_domain_s) and nperseg >= 16:
+            nperseg = max(8, len(self.time_domain_s) // 2)
+
         if nperseg < 8:
             warnings.warn(
                 f"Segment length ({nperseg}) too small for reliable Welch computation"
@@ -190,13 +263,8 @@ class HRVFreqDomainAnalysis:
             window = signal.windows.hann(nperseg)
 
         if self.detrend_method == "smoothness_priors":
-            try:
-                detrended_signal = detrend_with_smoothness_priors(
-                    self.time_domain_s,
-                    lambda_param=self.detrend_lambda,
-                    fs=self.sampling_rate,
-                    return_trend=False,
-                )
+            if self._smoothness_priors_applied:
+                detrended_signal = self.time_domain_s
                 freqs, psd_seconds = signal.welch(
                     x=detrended_signal,
                     fs=self.sampling_rate,
@@ -207,9 +275,9 @@ class HRVFreqDomainAnalysis:
                     scaling="density",
                     average="mean",
                 )
-            except Exception as e:
+            else:
                 warnings.warn(
-                    f"Smoothness priors detrending failed: {e}. Falling back to linear detrend."
+                    "Smoothness priors pre-detrending failed; falling back to linear detrend."
                 )
                 freqs, psd_seconds = signal.welch(
                     x=self.time_domain_s,
@@ -260,16 +328,11 @@ class HRVFreqDomainAnalysis:
 
         # Apply detrending
         if self.detrend_method == "smoothness_priors":
-            try:
-                detrended_signal = detrend_with_smoothness_priors(
-                    self.time_domain_s,
-                    lambda_param=self.detrend_lambda,
-                    fs=self.sampling_rate,
-                    return_trend=False,
-                )
-            except Exception as e:
+            if self._smoothness_priors_applied:
+                detrended_signal = self.time_domain_s
+            else:
                 warnings.warn(
-                    f"Smoothness priors detrending failed: {e}. Falling back to linear detrend."
+                    "Smoothness priors pre-detrending failed; falling back to linear detrend."
                 )
                 detrended_signal = signal.detrend(self.time_domain_s, type="linear")
         elif self.detrend_method == "linear":
@@ -318,67 +381,52 @@ class HRVFreqDomainAnalysis:
             warnings.warn(f"FFT PSD computation failed: {e}")
             return np.array([]), np.array([])
 
-    # Robust Burg (attempt) and Yule-Walker fallback
+    # Burg estimator and Yule-Walker fallback
     @staticmethod
     def _burg_try(data: np.ndarray, order: int) -> Optional[Tuple[np.ndarray, float]]:
         """
-        Try Burg estimate but be defensive. Return (ar_coefs, sigma2) or None on failure.
-        Note: this implementation is conservative and will return None on any suspicious condition.
+        Burg AR estimation with stability checks.
+        Return (ar_coefs, sigma2) or None on failure.
         """
         x = np.asarray(data, dtype=float)
         n = x.size
         if n <= order:
             return None
 
-        # safe initializations
-        f = x.copy()
-        b = x.copy()
-        ar = np.zeros(order, dtype=float)
+        # Initialize forward/backward prediction errors
+        ef = x[1:].copy()
+        eb = x[:-1].copy()
+        a = np.zeros(order + 1, dtype=float)
+        a[0] = 1.0
         sigma2 = np.dot(x, x) / float(n)
+        if not np.isfinite(sigma2) or sigma2 <= 0:
+            return None
 
         try:
-            for m in range(order):
-                # ensure valid slice lengths
-                if (m + 1) >= n:
-                    return None
-                ef = f[m + 1 :]
-                eb = b[m : n - 1]
-                if ef.size == 0 or eb.size == 0:
-                    return None
-
-                num = -2.0 * np.dot(ef, eb)
+            for m in range(1, order + 1):
+                num = -2.0 * np.dot(eb, ef)
                 den = np.dot(ef, ef) + np.dot(eb, eb)
-                if den == 0.0:
-                    k = 0.0
-                else:
-                    k = num / den
-
-                # update coefficients
-                if m == 0:
-                    ar[0] = k
-                else:
-                    ar_prev = ar[:m].copy()
-                    ar[:m] = ar_prev + k * ar_prev[::-1]
-                    ar[m] = k
-
-                # update errors
-                f_new = f.copy()
-                b_new = b.copy()
-                # slices must match - check sizes
-                if (m + 1) < n:
-                    f[m + 1 :] = f_new[m + 1 :] + k * b_new[m : n - 1]
-                    b[m + 1 :] = b_new[m + 1 :] + k * f_new[m : n - 1]
-                else:
+                if den <= 0.0:
                     return None
+                k = num / den
+                if not np.isfinite(k) or abs(k) >= 1.0:
+                    return None
+
+                a_prev = a.copy()
+                a[1:m] = a_prev[1:m] + k * a_prev[m - 1 : 0 : -1]
+                a[m] = k
+
+                ef_new = ef[1:] + k * eb[1:]
+                eb_new = eb[:-1] + k * ef[:-1]
+                ef, eb = ef_new, eb_new
 
                 sigma2 *= 1.0 - k * k
-                # guard numerical issues
                 if not np.isfinite(sigma2) or sigma2 <= 0:
                     return None
         except Exception:
             return None
 
-        return ar, sigma2
+        return a[1:], sigma2
 
     @staticmethod
     def _yule_walker_estimate(
@@ -398,7 +446,7 @@ class HRVFreqDomainAnalysis:
         mid = len(r) // 2
         r = r[mid : mid + order + 1] / float(n)
 
-        R = signal.toeplitz(r[:order])
+        R = linalg.toeplitz(r[:order])
         rhs = -r[1 : order + 1]
 
         try:
@@ -428,12 +476,15 @@ class HRVFreqDomainAnalysis:
             # detrend safely, with fallback
             try:
                 if self.detrend_method == "smoothness_priors":
-                    detrended_signal = detrend_with_smoothness_priors(
-                        self.time_domain_s,
-                        lambda_param=self.detrend_lambda,
-                        fs=self.sampling_rate,
-                        return_trend=False,
-                    )
+                    if self._smoothness_priors_applied:
+                        detrended_signal = self.time_domain_s
+                    else:
+                        warnings.warn(
+                            "Smoothness priors pre-detrending failed; falling back to linear detrend."
+                        )
+                        detrended_signal = signal.detrend(
+                            self.time_domain_s, type="linear"
+                        )
                 elif self.detrend_method == "linear":
                     detrended_signal = signal.detrend(self.time_domain_s, type="linear")
                 elif self.detrend_method == "constant":
@@ -458,6 +509,8 @@ class HRVFreqDomainAnalysis:
                 )
                 return fallback_freqs, fallback_psd
 
+            ar_input = detrended_signal - np.mean(detrended_signal)
+
             # determine adaptive order (heuristic)
             adaptive_max_order = max(4, n // 6)
             adaptive_order = min(self.ar_order, adaptive_max_order)
@@ -470,12 +523,12 @@ class HRVFreqDomainAnalysis:
             # try descending from adaptive_order down to 4
             for order_attempt in range(adaptive_order, 3, -1):
                 # first try Burg (defensive)
-                res = self._burg_try(detrended_signal, order_attempt)
+                res = self._burg_try(ar_input, order_attempt)
                 if res is not None:
                     ar_tmp, sigma2_tmp = res
                 else:
                     # fallback to Yule-Walker
-                    res_yw = self._yule_walker_estimate(detrended_signal, order_attempt)
+                    res_yw = self._yule_walker_estimate(ar_input, order_attempt)
                     if res_yw is None:
                         continue
                     ar_tmp, sigma2_tmp = res_yw
@@ -501,13 +554,18 @@ class HRVFreqDomainAnalysis:
 
             # compute frequency response
             nfft = 4096
-            w, h = signal.freqz(b=[1.0], a=a_poly, worN=nfft, fs=self.sampling_rate)
-            half = nfft // 2 + 1
-            freqs = w[:half]
-            h = h[:half]
+            freqs, h = signal.freqz(
+                b=[1.0], a=a_poly, worN=nfft, fs=self.sampling_rate
+            )
 
             # PSD in seconds^2/Hz
             psd_seconds = (sigma2 / self.sampling_rate) * (np.abs(h) ** 2)
+            # Normalize AR PSD so its integral matches the signal variance.
+            target_var = np.var(ar_input)
+            if np.isfinite(target_var) and target_var > 0:
+                psd_power = np.trapezoid(psd_seconds, freqs)
+                if np.isfinite(psd_power) and psd_power > 0:
+                    psd_seconds = psd_seconds * (target_var / psd_power)
             psd_ms2 = psd_seconds * 1e6
 
             # sanity: if PSD all zeros or NaN, fallback
@@ -544,6 +602,49 @@ class HRVFreqDomainAnalysis:
             raise ValueError(f"Unknown window function type: {self.window_type}")
         return window_func(nperseg)
 
+    def _compute_psd_diagnostics(
+        self, freqs: np.ndarray, psd: np.ndarray
+    ) -> Dict[str, float]:
+        diagnostics = {
+            "total_power_full": 0.0,
+            "total_power_band_0_0p4": 0.0,
+            "power_below_vlf": 0.0,
+            "power_above_hf": 0.0,
+            "fraction_in_band": 0.0,
+            "fraction_above_hf": 0.0,
+            "freq_min": float("nan"),
+            "freq_max": float("nan"),
+        }
+
+        if len(psd) == 0 or len(freqs) == 0:
+            return diagnostics
+
+        diagnostics["freq_min"] = float(freqs[0])
+        diagnostics["freq_max"] = float(freqs[-1])
+
+        full = np.trapezoid(psd, freqs)
+        if not np.isfinite(full) or full <= 0:
+            return diagnostics
+
+        low = self.DEFAULT_FREQ_BANDS["vlf"][0]
+        high = self.DEFAULT_FREQ_BANDS["hf"][1]
+        mask_band = (freqs >= low) & (freqs <= high)
+        mask_below = freqs < low
+        mask_above = freqs > high
+
+        band_power = np.trapezoid(psd[mask_band], freqs[mask_band]) if np.any(mask_band) else 0.0
+        below_power = np.trapezoid(psd[mask_below], freqs[mask_below]) if np.any(mask_below) else 0.0
+        above_power = np.trapezoid(psd[mask_above], freqs[mask_above]) if np.any(mask_above) else 0.0
+
+        diagnostics["total_power_full"] = float(full)
+        diagnostics["total_power_band_0_0p4"] = float(band_power)
+        diagnostics["power_below_vlf"] = float(below_power)
+        diagnostics["power_above_hf"] = float(above_power)
+        diagnostics["fraction_in_band"] = float(band_power / full)
+        diagnostics["fraction_above_hf"] = float(above_power / full)
+
+        return diagnostics
+
     def _compute_spectral_metrics(self, use_ar: bool = False, use_fft: bool = False) -> Dict[str, float]:
         if use_ar:
             freqs = self.ar_freqs
@@ -566,6 +667,7 @@ class HRVFreqDomainAnalysis:
             "hf_power_nu": 0.0,
             "lf_hf_ratio": float("nan"),
             "total_power": 0.0,
+            "peak_freq_vlf": float("nan"),
             "peak_freq_lf": float("nan"),
             "peak_freq_hf": float("nan"),
             "relative_lf_power": 0.0,
@@ -581,7 +683,16 @@ class HRVFreqDomainAnalysis:
             return default_results
 
         try:
-            total_power = np.trapezoid(psd, freqs)
+            # Kubios-style total power: integrate 0.0-0.4 Hz (VLF+LF+HF)
+            total_low = self.DEFAULT_FREQ_BANDS["vlf"][0]
+            total_high = self.DEFAULT_FREQ_BANDS["hf"][1]
+            total_mask = (freqs >= total_low) & (freqs <= total_high)
+            if not np.any(total_mask):
+                warnings.warn(
+                    "No frequency points found in total power band [0.0, 0.4] Hz."
+                )
+                return default_results
+            total_power = np.trapezoid(psd[total_mask], freqs[total_mask])
             if total_power <= 0:
                 warnings.warn("Total power is zero or negative. Returning defaults.")
                 return default_results
@@ -594,14 +705,7 @@ class HRVFreqDomainAnalysis:
         for band, (low, high) in self.DEFAULT_FREQ_BANDS.items():
             if band == "lf_hf_ratio":
                 continue
-
-            if band == "vlf":
-                first_idx = 1 if len(freqs) > 1 and freqs[0] == 0.0 else 0
-                mask = (freqs >= low) & (freqs <= high)
-                if first_idx == 1:
-                    mask[0] = False
-            else:
-                mask = (freqs >= low) & (freqs <= high)
+            mask = (freqs >= low) & (freqs <= high)
 
             if not np.any(mask):
                 warnings.warn(
@@ -641,6 +745,7 @@ class HRVFreqDomainAnalysis:
             results["lf_nu"] = 0.0
             results["hf_nu"] = 0.0
 
+        results["peak_freq_vlf"] = self._find_peak_frequency("vlf", freqs, psd)
         results["peak_freq_lf"] = self._find_peak_frequency("lf", freqs, psd)
         results["peak_freq_hf"] = self._find_peak_frequency("hf", freqs, psd)
 
@@ -709,7 +814,14 @@ class HRVFreqDomainAnalysis:
             ),
             "preprocessing_applied": self.preprocessing_result is not None,
             "analysis_window": self.analysis_window,
+            "clip_rr_resampled": self.clip_rr_resampled,
+            "rr_clip_range_s": self.rr_clip_range,
+            "welch_shorten_if_short": self.welch_shorten_if_short,
         }
+
+        results["ar_psd_diagnostics"] = self._compute_psd_diagnostics(
+            self.ar_freqs, self.ar_psd
+        )
 
         if self.preprocessing_result is not None:
             try:
