@@ -58,6 +58,7 @@ class HRVFreqDomainAnalysis:
         rr_clip_range: Tuple[float, float] = (0.2, 3.0),
         welch_shorten_if_short: bool = True,
         analysis_window: Optional[Tuple[float, float]] = None,
+        enable_diagnostics: bool = False,
     ):
         self.rr_intervals_ms = np.array(preprocessed_rri, dtype=float)
         self.preprocessing_result = preprocessing_result
@@ -72,6 +73,10 @@ class HRVFreqDomainAnalysis:
         self.rr_clip_range = tuple(rr_clip_range)
         self.welch_shorten_if_short = bool(welch_shorten_if_short)
         self.analysis_window = analysis_window
+        self.enable_diagnostics = bool(enable_diagnostics)
+        self._welch_diagnostics = {}
+        self._fft_diagnostics = {}
+        self._ar_diagnostics = {}
 
         self._validate_input()
 
@@ -141,6 +146,8 @@ class HRVFreqDomainAnalysis:
         self.spectral_metrics = self._compute_spectral_metrics()
         self.fft_spectral_metrics = self._compute_spectral_metrics(use_fft=True)
         self.ar_spectral_metrics = self._compute_spectral_metrics(use_ar=True)
+        if self.enable_diagnostics:
+            self.frequency_diagnostics = self._compute_frequency_diagnostics()
 
     def _validate_input(self) -> None:
         if self.sampling_rate <= 0:
@@ -238,22 +245,47 @@ class HRVFreqDomainAnalysis:
 
     def _compute_welch_psd(self) -> Tuple[np.ndarray, np.ndarray]:
         if len(self.time_domain_s) == 0:
+            self._welch_diagnostics = self._empty_welch_diagnostics()
             return np.array([]), np.array([])
 
         requested = int(self.segment_length * self.sampling_rate)
         nperseg = min(requested, len(self.time_domain_s))
+        original_nperseg = nperseg
 
         # Optionally shorten when recording is shorter than requested window.
         if self.welch_shorten_if_short and nperseg == len(self.time_domain_s) and nperseg >= 16:
             nperseg = max(8, len(self.time_domain_s) // 2)
+        shorten_applied = nperseg != original_nperseg
 
         if nperseg < 8:
             warnings.warn(
                 f"Segment length ({nperseg}) too small for reliable Welch computation"
             )
+            self._welch_diagnostics = self._empty_welch_diagnostics(
+                requested_nperseg=requested,
+                effective_nperseg=nperseg,
+                shorten_applied=shorten_applied,
+            )
             return np.array([]), np.array([])
 
         noverlap = int(nperseg * self.overlap_ratio)
+        self._welch_diagnostics = {
+            "requested_nperseg": int(requested),
+            "effective_nperseg": int(nperseg),
+            "effective_noverlap": int(noverlap),
+            "effective_nfft": int(nperseg),
+            "frequency_resolution_hz": float(self.sampling_rate / nperseg),
+            "number_of_segments": int(
+                self._count_welch_segments(len(self.time_domain_s), nperseg, noverlap)
+            ),
+            "number_of_resampled_samples": int(len(self.time_domain_s)),
+            "resampled_duration_seconds": float(
+                len(self.time_domain_s) / self.sampling_rate
+            ),
+            "whether_welch_shorten_if_short_applied": bool(shorten_applied),
+            "window_type": self.window_type,
+            "detrend_method": self._effective_detrend_label(for_welch=True),
+        }
         try:
             window = self._get_window(nperseg)
         except Exception as e:
@@ -261,6 +293,7 @@ class HRVFreqDomainAnalysis:
                 f"Failed to create {self.window_type} window: {e}. Using Hann window."
             )
             window = signal.windows.hann(nperseg)
+            self._welch_diagnostics["window_type"] = "hann"
 
         if self.detrend_method == "smoothness_priors":
             if self._smoothness_priors_applied:
@@ -317,6 +350,7 @@ class HRVFreqDomainAnalysis:
         This is a simple, non-averaged method that uses the entire signal.
         """
         if len(self.time_domain_s) == 0:
+            self._fft_diagnostics = self._empty_fft_diagnostics()
             return np.array([]), np.array([])
 
         n = len(self.time_domain_s)
@@ -324,6 +358,7 @@ class HRVFreqDomainAnalysis:
             warnings.warn(
                 f"Signal length ({n}) too small for reliable FFT computation"
             )
+            self._fft_diagnostics = self._empty_fft_diagnostics(n_samples=n)
             return np.array([]), np.array([])
 
         # Apply detrending
@@ -350,6 +385,9 @@ class HRVFreqDomainAnalysis:
                 f"Failed to create {self.window_type} window: {e}. Using Hann window."
             )
             window = signal.windows.hann(n)
+            fft_window_type = "hann"
+        else:
+            fft_window_type = self.window_type
 
         windowed_signal = detrended_signal * window
 
@@ -371,6 +409,33 @@ class HRVFreqDomainAnalysis:
 
             # Convert to ms^2/Hz
             psd_ms2 = psd_seconds * 1e6
+            integrated_power = (
+                float(np.trapezoid(psd_ms2, freqs)) if len(freqs) > 1 else 0.0
+            )
+            variance_ms2 = float(np.var(detrended_signal) * 1e6)
+            ratio = (
+                integrated_power / variance_ms2
+                if np.isfinite(variance_ms2) and variance_ms2 > 0
+                else float("nan")
+            )
+            ratio_warning = None
+            if np.isfinite(ratio) and abs(ratio - 1.0) > 0.2:
+                ratio_warning = (
+                    "Integrated FFT PSD power differs substantially from input "
+                    "signal variance."
+                )
+            self._fft_diagnostics = {
+                "n_samples": int(n),
+                "frequency_resolution_hz": float(
+                    freqs[1] - freqs[0] if len(freqs) > 1 else 0.0
+                ),
+                "window_type": fft_window_type,
+                "integrated_psd_power": integrated_power,
+                "variance_of_input_signal": variance_ms2,
+                "integrated_psd_power_variance_ratio": float(ratio),
+                "integrated_psd_power_over_variance_ratio": float(ratio),
+                "warning": ratio_warning,
+            }
 
             if np.all(psd_ms2 == 0):
                 warnings.warn("FFT PSD is zero everywhere. Check signal quality.")
@@ -379,6 +444,7 @@ class HRVFreqDomainAnalysis:
 
         except Exception as e:
             warnings.warn(f"FFT PSD computation failed: {e}")
+            self._fft_diagnostics = self._empty_fft_diagnostics(n_samples=n)
             return np.array([]), np.array([])
 
     # Burg estimator and Yule-Walker fallback
@@ -470,6 +536,9 @@ class HRVFreqDomainAnalysis:
         )
 
         if len(self.time_domain_s) == 0:
+            self._set_ar_fallback_diagnostics(
+                fallback_freqs, fallback_psd, "empty_time_domain_signal"
+            )
             return fallback_freqs, fallback_psd
 
         try:
@@ -503,13 +572,18 @@ class HRVFreqDomainAnalysis:
                     detrended_signal = self.time_domain_s.copy()
 
             n = len(detrended_signal)
+            ar_input = detrended_signal - np.mean(detrended_signal)
             if n < 8:
                 warnings.warn(
                     "Very short signal for AR estimation. Using Welch PSD as AR fallback."
                 )
+                self._set_ar_fallback_diagnostics(
+                    fallback_freqs,
+                    fallback_psd,
+                    "signal_too_short_for_ar_estimation",
+                    ar_input=ar_input,
+                )
                 return fallback_freqs, fallback_psd
-
-            ar_input = detrended_signal - np.mean(detrended_signal)
 
             # determine adaptive order (heuristic)
             adaptive_max_order = max(4, n // 6)
@@ -519,6 +593,7 @@ class HRVFreqDomainAnalysis:
             ar_coefs = None
             sigma2 = None
             effective_order = None
+            estimator_used = None
 
             # try descending from adaptive_order down to 4
             for order_attempt in range(adaptive_order, 3, -1):
@@ -526,12 +601,14 @@ class HRVFreqDomainAnalysis:
                 res = self._burg_try(ar_input, order_attempt)
                 if res is not None:
                     ar_tmp, sigma2_tmp = res
+                    estimator_tmp = "burg"
                 else:
                     # fallback to Yule-Walker
                     res_yw = self._yule_walker_estimate(ar_input, order_attempt)
                     if res_yw is None:
                         continue
                     ar_tmp, sigma2_tmp = res_yw
+                    estimator_tmp = "yule_walker"
 
                 # check sigma2 validity
                 if sigma2_tmp is None or not np.isfinite(sigma2_tmp) or sigma2_tmp <= 0:
@@ -541,11 +618,18 @@ class HRVFreqDomainAnalysis:
                 ar_coefs = ar_tmp
                 sigma2 = sigma2_tmp
                 effective_order = order_attempt
+                estimator_used = estimator_tmp
                 break
 
             if ar_coefs is None:
                 warnings.warn(
                     "Could not estimate AR model reliably; using Welch PSD as AR fallback."
+                )
+                self._set_ar_fallback_diagnostics(
+                    fallback_freqs,
+                    fallback_psd,
+                    "ar_model_estimation_failed",
+                    ar_input=ar_input,
                 )
                 return fallback_freqs, fallback_psd
 
@@ -562,11 +646,41 @@ class HRVFreqDomainAnalysis:
             psd_seconds = (sigma2 / self.sampling_rate) * (np.abs(h) ** 2)
             # Normalize AR PSD so its integral matches the signal variance.
             target_var = np.var(ar_input)
+            variance_normalization_applied = False
             if np.isfinite(target_var) and target_var > 0:
                 psd_power = np.trapezoid(psd_seconds, freqs)
                 if np.isfinite(psd_power) and psd_power > 0:
                     psd_seconds = psd_seconds * (target_var / psd_power)
+                    variance_normalization_applied = True
             psd_ms2 = psd_seconds * 1e6
+            integrated_power = (
+                float(np.trapezoid(psd_ms2, freqs)) if len(freqs) > 1 else 0.0
+            )
+            variance_ms2 = float(target_var * 1e6)
+            ratio = (
+                integrated_power / variance_ms2
+                if np.isfinite(variance_ms2) and variance_ms2 > 0
+                else float("nan")
+            )
+            ratio_warning = None
+            if np.isfinite(ratio) and abs(ratio - 1.0) > 0.2:
+                ratio_warning = (
+                    "Integrated AR PSD power differs substantially from AR input "
+                    "signal variance."
+                )
+            self._ar_diagnostics = {
+                "requested_ar_order": int(self.ar_order),
+                "effective_ar_order": int(effective_order),
+                "estimator_used": estimator_used,
+                "fallback_reason": None,
+                "nfft": int(nfft),
+                "integrated_psd_power": integrated_power,
+                "variance_of_ar_input": variance_ms2,
+                "integrated_psd_power_variance_ratio": float(ratio),
+                "integrated_psd_power_over_variance_ratio": float(ratio),
+                "variance_normalization_applied": bool(variance_normalization_applied),
+                "warning": ratio_warning,
+            }
 
             # sanity: if PSD all zeros or NaN, fallback
             if (
@@ -575,6 +689,12 @@ class HRVFreqDomainAnalysis:
                 or np.all(psd_ms2 == 0)
             ):
                 warnings.warn("AR PSD invalid (zeros/NaN). Falling back to Welch PSD.")
+                self._set_ar_fallback_diagnostics(
+                    fallback_freqs,
+                    fallback_psd,
+                    "ar_psd_invalid",
+                    ar_input=ar_input,
+                )
                 return fallback_freqs, fallback_psd
 
             return freqs, psd_ms2
@@ -582,6 +702,9 @@ class HRVFreqDomainAnalysis:
         except Exception as e:
             warnings.warn(
                 f"AR spectrum computation failed: {e}. Falling back to Welch PSD."
+            )
+            self._set_ar_fallback_diagnostics(
+                fallback_freqs, fallback_psd, f"ar_spectrum_exception: {e}"
             )
             return fallback_freqs, fallback_psd
 
@@ -601,6 +724,214 @@ class HRVFreqDomainAnalysis:
         if window_func is None:
             raise ValueError(f"Unknown window function type: {self.window_type}")
         return window_func(nperseg)
+
+    def _effective_detrend_label(self, for_welch: bool = False) -> str:
+        if self.detrend_method == "smoothness_priors":
+            if self._smoothness_priors_applied:
+                return "smoothness_priors"
+            return "linear"
+        if self.detrend_method is None:
+            return "none"
+        return str(self.detrend_method)
+
+    @staticmethod
+    def _count_welch_segments(n_samples: int, nperseg: int, noverlap: int) -> int:
+        if n_samples <= 0 or nperseg <= 0 or n_samples < nperseg:
+            return 0
+        step = nperseg - noverlap
+        if step <= 0:
+            return 0
+        return 1 + (n_samples - nperseg) // step
+
+    def _empty_welch_diagnostics(
+        self,
+        requested_nperseg: int = 0,
+        effective_nperseg: int = 0,
+        shorten_applied: bool = False,
+    ) -> Dict[str, Union[int, float, str, bool]]:
+        return {
+            "requested_nperseg": int(requested_nperseg),
+            "effective_nperseg": int(effective_nperseg),
+            "effective_noverlap": 0,
+            "effective_nfft": int(effective_nperseg),
+            "frequency_resolution_hz": 0.0,
+            "number_of_segments": 0,
+            "number_of_resampled_samples": int(len(self.time_domain_s)),
+            "resampled_duration_seconds": float(
+                len(self.time_domain_s) / self.sampling_rate
+                if len(self.time_domain_s) > 0
+                else 0.0
+            ),
+            "whether_welch_shorten_if_short_applied": bool(shorten_applied),
+            "window_type": self.window_type,
+            "detrend_method": self._effective_detrend_label(for_welch=True),
+        }
+
+    def _empty_fft_diagnostics(
+        self, n_samples: int = 0
+    ) -> Dict[str, Union[int, float, str, None]]:
+        return {
+            "n_samples": int(n_samples),
+            "frequency_resolution_hz": 0.0,
+            "window_type": self.window_type,
+            "integrated_psd_power": 0.0,
+            "variance_of_input_signal": 0.0,
+            "integrated_psd_power_variance_ratio": float("nan"),
+            "integrated_psd_power_over_variance_ratio": float("nan"),
+            "warning": None,
+        }
+
+    def _set_ar_fallback_diagnostics(
+        self,
+        fallback_freqs: np.ndarray,
+        fallback_psd: np.ndarray,
+        fallback_reason: str,
+        ar_input: Optional[np.ndarray] = None,
+    ) -> None:
+        integrated_power = (
+            float(np.trapezoid(fallback_psd, fallback_freqs))
+            if len(fallback_freqs) > 1 and len(fallback_psd) > 1
+            else 0.0
+        )
+        variance_ms2 = (
+            float(np.var(ar_input) * 1e6)
+            if ar_input is not None and len(ar_input) > 0
+            else 0.0
+        )
+        ratio = (
+            integrated_power / variance_ms2
+            if np.isfinite(variance_ms2) and variance_ms2 > 0
+            else float("nan")
+        )
+        ratio_warning = None
+        if np.isfinite(ratio) and abs(ratio - 1.0) > 0.2:
+            ratio_warning = (
+                "Integrated fallback PSD power differs substantially from AR input "
+                "signal variance."
+            )
+        self._ar_diagnostics = {
+            "requested_ar_order": int(self.ar_order),
+            "effective_ar_order": None,
+            "estimator_used": "welch_fallback",
+            "fallback_reason": fallback_reason,
+            "nfft": int(len(fallback_freqs)),
+            "integrated_psd_power": integrated_power,
+            "variance_of_ar_input": variance_ms2,
+            "integrated_psd_power_variance_ratio": float(ratio),
+            "integrated_psd_power_over_variance_ratio": float(ratio),
+            "variance_normalization_applied": False,
+            "warning": ratio_warning,
+        }
+
+    @staticmethod
+    def _frequency_spacing(freqs: np.ndarray) -> float:
+        return float(freqs[1] - freqs[0]) if len(freqs) > 1 else 0.0
+
+    def _duration_warnings(self, duration_seconds: float) -> list:
+        warnings_list = []
+        if duration_seconds < 60:
+            warnings_list.append("Frequency-domain HRV metrics may be unreliable.")
+        if duration_seconds < 120:
+            warnings_list.append("LF estimates should be interpreted cautiously.")
+        if duration_seconds < 300:
+            warnings_list.append("VLF estimates are likely unreliable.")
+        return warnings_list
+
+    def _band_duration_warnings(self, band: str, duration_seconds: float) -> list:
+        warnings_list = []
+        if band in ("ulf", "vlf") and duration_seconds < 300:
+            warnings_list.append(
+                f"Recording duration is insufficient for reliable {band.upper()} estimation."
+            )
+        elif band == "lf" and duration_seconds < 120:
+            warnings_list.append(
+                "Recording duration is insufficient for reliable LF estimation."
+            )
+        elif band == "hf" and duration_seconds < 60:
+            warnings_list.append(
+                "Recording duration is insufficient for reliable HF estimation."
+            )
+        return warnings_list
+
+    def _compute_band_diagnostics(
+        self, freqs: np.ndarray, psd: np.ndarray, duration_seconds: float
+    ) -> Dict[str, Dict[str, Union[float, int, list]]]:
+        diagnostics = {}
+        for band in ["ulf", "vlf", "lf", "hf"]:
+            low, high = self.DEFAULT_FREQ_BANDS[band]
+            mask = (freqs >= low) & (freqs <= high)
+            bin_count = int(np.count_nonzero(mask))
+            if bin_count > 0:
+                band_freqs = freqs[mask]
+                band_psd = psd[mask]
+                first_bin = float(band_freqs[0])
+                last_bin = float(band_freqs[-1])
+                band_power = (
+                    float(np.trapezoid(band_psd, band_freqs))
+                    if bin_count > 1
+                    else 0.0
+                )
+            else:
+                first_bin = float("nan")
+                last_bin = float("nan")
+                band_power = 0.0
+
+            band_warnings = []
+            if bin_count < 2:
+                band_warnings.append("Fewer than 2 PSD bins fall inside this band.")
+            band_warnings.extend(self._band_duration_warnings(band, duration_seconds))
+
+            diagnostics[band] = {
+                "low_hz": float(low),
+                "high_hz": float(high),
+                "band_power": band_power,
+                "bin_count": bin_count,
+                "first_bin_hz": first_bin,
+                "last_bin_hz": last_bin,
+                "warnings": band_warnings,
+            }
+        return diagnostics
+
+    def _compute_frequency_diagnostics(self) -> Dict[str, Dict]:
+        duration_seconds = float(
+            len(self.time_domain_s) / self.sampling_rate
+            if len(self.time_domain_s) > 0
+            else 0.0
+        )
+
+        band_definitions = {
+            band: {"low_hz": float(bounds[0]), "high_hz": float(bounds[1])}
+            for band, bounds in self.DEFAULT_FREQ_BANDS.items()
+            if band in ("ulf", "vlf", "lf", "hf")
+        }
+
+        diagnostics = {
+            "duration_seconds": duration_seconds,
+            "duration_warnings": self._duration_warnings(duration_seconds),
+            "band_definitions": band_definitions,
+            "band_definition_warnings": [
+                "ULF and VLF currently overlap; definitions are reported unchanged."
+            ],
+            "welch": dict(self._welch_diagnostics),
+            "fft": dict(self._fft_diagnostics),
+            "ar": dict(self._ar_diagnostics),
+        }
+
+        method_specs = [
+            ("welch", self.freqs, self.psd),
+            ("fft", self.fft_freqs, self.fft_psd),
+            ("ar", self.ar_freqs, self.ar_psd),
+        ]
+        for method_name, freqs, psd in method_specs:
+            diagnostics[method_name]["effective_frequency_spacing_hz"] = (
+                self._frequency_spacing(freqs)
+            )
+            diagnostics[method_name]["total_psd_bin_count"] = int(len(freqs))
+            diagnostics[method_name]["band_diagnostics"] = (
+                self._compute_band_diagnostics(freqs, psd, duration_seconds)
+            )
+
+        return diagnostics
 
     def _compute_psd_diagnostics(
         self, freqs: np.ndarray, psd: np.ndarray
@@ -822,6 +1153,10 @@ class HRVFreqDomainAnalysis:
         results["ar_psd_diagnostics"] = self._compute_psd_diagnostics(
             self.ar_freqs, self.ar_psd
         )
+        if self.enable_diagnostics:
+            results["frequency_diagnostics"] = getattr(
+                self, "frequency_diagnostics", self._compute_frequency_diagnostics()
+            )
 
         if self.preprocessing_result is not None:
             try:

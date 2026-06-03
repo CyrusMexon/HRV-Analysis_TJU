@@ -255,6 +255,7 @@ class TestPipelineOutputs:
             "vlf_power",
             "lf_hf_ratio",
             "total_power",
+            "peak_freq_vlf",
             "peak_freq_lf",
             "peak_freq_hf",
         ]

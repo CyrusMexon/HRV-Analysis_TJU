@@ -300,6 +300,7 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
             "hf_power_nu",
             "lf_hf_ratio",
             "total_power",
+            "peak_freq_vlf",
             "peak_freq_lf",
             "peak_freq_hf",
             "relative_lf_power",
@@ -362,6 +363,7 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
             "hf_power_nu",
             "lf_hf_ratio",
             "total_power",
+            "peak_freq_vlf",
             "peak_freq_lf",
             "peak_freq_hf",
             "relative_lf_power",
@@ -781,7 +783,7 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         """Helper to add frequency band shading to plots"""
         bands = {
             "ulf": (0.0, 0.003),
-            "vlf": (0.003, 0.04),
+            "vlf": (0.0, 0.04),
             "lf": (0.04, 0.15),
             "hf": (0.15, 0.4),
         }
@@ -933,6 +935,102 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
             results = analyzer.get_results()
             self.assertGreater(results["total_power"], 0)
             self.assertEqual(results["analysis_info"]["overlap_ratio"], overlap)
+
+    def test_frequency_diagnostics_only_when_enabled(self):
+        """Frequency diagnostics should be opt-in only."""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+        self.assertNotIn("frequency_diagnostics", analyzer.get_results())
+
+        analyzer_with_diagnostics = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            enable_diagnostics=True,
+        )
+        results = analyzer_with_diagnostics.get_results()
+        self.assertIn("frequency_diagnostics", results)
+        self.assertIn("welch", results["frequency_diagnostics"])
+        self.assertIn("fft", results["frequency_diagnostics"])
+        self.assertIn("ar", results["frequency_diagnostics"])
+
+    def test_frequency_diagnostics_do_not_change_existing_outputs(self):
+        """Enabling diagnostics should not change existing metric outputs."""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+        analyzer_with_diagnostics = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            enable_diagnostics=True,
+        )
+
+        results = analyzer.get_results()
+        diagnostic_results = analyzer_with_diagnostics.get_results()
+
+        for key, value in results.items():
+            self.assertIn(key, diagnostic_results)
+            if isinstance(value, float) and np.isnan(value):
+                self.assertTrue(np.isnan(diagnostic_results[key]))
+            else:
+                self.assertEqual(diagnostic_results[key], value)
+
+    def test_short_recording_frequency_diagnostics_warnings(self):
+        """Short recordings should report duration and band reliability warnings."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            analyzer = HRVFreqDomainAnalysis(
+                self.short_rr_ms,
+                enable_diagnostics=True,
+            )
+
+        diagnostics = analyzer.get_results()["frequency_diagnostics"]
+        self.assertIn(
+            "Frequency-domain HRV metrics may be unreliable.",
+            diagnostics["duration_warnings"],
+        )
+        self.assertIn(
+            "LF estimates should be interpreted cautiously.",
+            diagnostics["duration_warnings"],
+        )
+        self.assertIn(
+            "VLF estimates are likely unreliable.",
+            diagnostics["duration_warnings"],
+        )
+        self.assertTrue(
+            diagnostics["welch"]["band_diagnostics"]["lf"]["warnings"]
+        )
+
+    def test_ar_fallback_is_reported_in_diagnostics(self):
+        """AR diagnostics should identify Welch fallback when AR cannot run."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            analyzer = HRVFreqDomainAnalysis(
+                self.very_short_rr_ms,
+                enable_diagnostics=True,
+            )
+
+        ar_diagnostics = analyzer.get_results()["frequency_diagnostics"]["ar"]
+        self.assertEqual(ar_diagnostics["estimator_used"], "welch_fallback")
+        self.assertIsNotNone(ar_diagnostics["fallback_reason"])
+
+    def test_welch_effective_parameters_are_reported(self):
+        """Welch diagnostics should expose the effective SciPy parameters."""
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            sampling_rate=4.0,
+            segment_length=120.0,
+            overlap_ratio=0.75,
+            enable_diagnostics=True,
+        )
+
+        welch = analyzer.get_results()["frequency_diagnostics"]["welch"]
+        expected_nperseg = int(120.0 * 4.0)
+        self.assertEqual(welch["requested_nperseg"], expected_nperseg)
+        self.assertEqual(welch["effective_nperseg"], expected_nperseg)
+        self.assertEqual(welch["effective_noverlap"], int(expected_nperseg * 0.75))
+        self.assertEqual(welch["effective_nfft"], expected_nperseg)
+        self.assertAlmostEqual(
+            welch["frequency_resolution_hz"],
+            4.0 / expected_nperseg,
+        )
+        self.assertFalse(welch["whether_welch_shorten_if_short_applied"])
+        self.assertEqual(welch["number_of_resampled_samples"], len(analyzer.time_domain_s))
+        self.assertGreaterEqual(welch["number_of_segments"], 1)
 
 
 if __name__ == "__main__":

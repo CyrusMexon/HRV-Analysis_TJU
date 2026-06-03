@@ -1,0 +1,1004 @@
+"""
+Compare HRV Studio native frequency-domain metrics against NeuroKit2.
+
+This is a validation utility only. It does not change HRV Studio analysis code.
+
+Example:
+    python tools/validate_freq_domain_neurokit2.py data/sample_rr.csv --run-name v02_with_diagnostics --enable-diagnostics
+
+To match the current pipeline default detrending:
+    python tools/validate_freq_domain_neurokit2.py data/sample_rr.csv --run-name v02_linear_detrend --detrend-method linear
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import glob
+import importlib.metadata
+import json
+import math
+import platform
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+from scipy import signal
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RUNS_ROOT = PROJECT_ROOT / "validation" / "runs"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from hrvlib.data_handler import load_rr_file
+from hrvlib.metrics.freq_domain import HRVFreqDomainAnalysis
+from hrvlib.signal_processing.smoothness_priors import (
+    detrend_uniform_with_smoothness_priors,
+)
+
+
+METRICS = {
+    "VLF": "vlf_power",
+    "LF": "lf_power",
+    "HF": "hf_power",
+    "total_power": "total_power",
+    "LF/HF": "lf_hf_ratio",
+    "LF_nu": "lf_nu",
+    "HF_nu": "hf_nu",
+}
+
+BAND_FOR_METRIC = {
+    "VLF": "vlf",
+    "LF": "lf",
+    "HF": "hf",
+    "total_power": "total",
+    "LF/HF": "lf_hf",
+    "LF_nu": "lf_hf",
+    "HF_nu": "lf_hf",
+}
+
+SUPPORTED_SUFFIXES = {".csv", ".txt", ".edf", ".hrm", ".fit", ".sml", ".json", ".acq"}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Validate HRV Studio frequency-domain metrics against NeuroKit2 with "
+            "matched RR input, duration, 4 Hz interpolation, bands, and Welch settings."
+        )
+    )
+    parser.add_argument(
+        "inputs",
+        nargs="+",
+        help="Input RR/data files, directories, or glob patterns.",
+    )
+    parser.add_argument(
+        "--output",
+        default="freq_domain_neurokit2_validation.csv",
+        help="Output CSV filename. It is always written inside validation/runs/<run_name>/.",
+    )
+    parser.add_argument("--run-name", required=True, help="Run folder name under validation/runs/.")
+    parser.add_argument("--overwrite", action="store_true", help="Allow writing into an existing run folder.")
+    parser.add_argument(
+        "--purpose",
+        default="Compare HRV Studio native frequency-domain metrics against NeuroKit2.",
+        help="Short description written to run_info.json and notes.md.",
+    )
+    parser.add_argument("--enable-diagnostics", action="store_true")
+    parser.add_argument("--recursive", action="store_true", help="Recurse into directories.")
+    parser.add_argument("--interpolation-rate", type=float, default=4.0)
+    parser.add_argument("--segment-length", type=float, default=120.0)
+    parser.add_argument("--overlap-ratio", type=float, default=0.75)
+    parser.add_argument("--window-type", default="hann")
+    parser.add_argument("--ar-order", type=int, default=16)
+    parser.add_argument("--detrend-lambda", type=float, default=500.0)
+    parser.add_argument(
+        "--detrend-method",
+        choices=["none", "linear", "constant", "smoothness_priors"],
+        default="none",
+        help="Native HRV Studio detrending method to use for the comparison.",
+    )
+    parser.add_argument(
+        "--neurokit-interpolation-method",
+        default="cubic",
+        help=(
+            "Interpolation method passed to NeuroKit2 intervals_process. "
+            "Use cubic for closest conceptual match to HRV Studio cubic interpolation."
+        ),
+    )
+    parser.add_argument(
+        "--experimental-native-welch-nfft-multiplier",
+        type=float,
+        default=1.0,
+        help=(
+            "Validation-only experiment: recompute native Welch metrics with "
+            "nfft = multiplier * nperseg and add comparison columns. "
+            "Default HRV Studio behavior is unchanged."
+        ),
+    )
+    return parser.parse_args()
+
+
+def prepare_run_directory(run_name: str, overwrite: bool) -> Path:
+    run_name = run_name.strip()
+    run_path = Path(run_name)
+    if not run_name or run_path.is_absolute() or len(run_path.parts) != 1 or ".." in run_path.parts:
+        raise SystemExit("--run-name must be a simple folder name under validation/runs/.")
+
+    run_dir = RUNS_ROOT / run_name
+    if run_dir.exists() and not overwrite:
+        raise SystemExit(
+            f"Run directory already exists: {run_dir}\n"
+            "Use --overwrite to write into this run folder explicitly."
+        )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def git_output(*args: str) -> Optional[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def package_version(name: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def software_versions() -> Dict[str, Optional[str]]:
+    return {
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "scipy": package_version("scipy"),
+        "pandas": package_version("pandas"),
+        "neurokit2": package_version("neurokit2"),
+    }
+
+
+def to_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return to_jsonable(value.tolist())
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        value = float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def flatten_dict(data: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+    row: Dict[str, Any] = {}
+    for key, value in data.items():
+        flat_key = f"{prefix}_{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            row.update(flatten_dict(value, flat_key))
+        elif isinstance(value, (list, tuple)):
+            row[flat_key] = json.dumps(to_jsonable(value), ensure_ascii=False)
+        else:
+            row[flat_key] = to_jsonable(value)
+    return row
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(to_jsonable(data), f, indent=2)
+        f.write("\n")
+
+
+def finite_float(value: Any) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def format_float(value: Optional[float], digits: int = 2) -> str:
+    if value is None or not math.isfinite(value):
+        return "not available"
+    return f"{value:.{digits}f}"
+
+
+def format_count_pct(count: Optional[int], total: int) -> str:
+    if count is None:
+        return "not available"
+    pct = (count / total * 100.0) if total else 0.0
+    return f"{count}/{total} ({pct:.1f}%)"
+
+
+def hrv_settings(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "sampling_rate": args.interpolation_rate,
+        "window_type": args.window_type,
+        "segment_length": args.segment_length,
+        "overlap_ratio": args.overlap_ratio,
+        "detrend_method": normalize_detrend_method(args.detrend_method),
+        "detrend_lambda": args.detrend_lambda,
+        "ar_order": args.ar_order,
+        "enable_diagnostics": args.enable_diagnostics,
+        "experimental_native_welch_nfft_multiplier": args.experimental_native_welch_nfft_multiplier,
+    }
+
+
+def neurokit2_settings(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "interpolation_rate": args.interpolation_rate,
+        "interpolation_method": args.neurokit_interpolation_method,
+        "normalize": False,
+    }
+
+
+def build_run_info(
+    args: argparse.Namespace,
+    input_paths: List[Path],
+    run_dir: Path,
+    failures: List[Tuple[Path, Exception]],
+) -> Dict[str, Any]:
+    git_status = git_output("status", "--short")
+    return {
+        "run_name": args.run_name,
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "validation_script": str(Path(__file__).resolve().relative_to(PROJECT_ROOT)),
+        "purpose": args.purpose,
+        "validation_type": "frequency_domain_neurokit2_comparison",
+        "git_commit_hash": git_output("rev-parse", "HEAD"),
+        "git_dirty_status": "clean" if git_status == "" else git_status,
+        "input_files": [str(path) for path in input_paths],
+        "output_directory": str(run_dir.resolve()),
+        "hrv_freq_domain_settings": hrv_settings(args),
+        "neurokit2_settings": neurokit2_settings(args),
+        "software_versions": software_versions(),
+        "failures": [{"input_file": str(path), "error": str(exc)} for path, exc in failures],
+    }
+
+
+def diagnostic_metric_keys(results: Dict[str, Any]) -> List[str]:
+    keys = []
+    prefixes = ["", "welch_", "fft_", "ar_"]
+    for prefix in prefixes:
+        for metric_key in METRICS.values():
+            key = f"{prefix}{metric_key}"
+            if key in results and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def metric_values_equal(left: Any, right: Any) -> bool:
+    try:
+        left_numeric = float(left)
+        right_numeric = float(right)
+    except (TypeError, ValueError):
+        return left == right
+    if math.isnan(left_numeric) and math.isnan(right_numeric):
+        return True
+    if not math.isfinite(left_numeric) or not math.isfinite(right_numeric):
+        return left_numeric == right_numeric
+    left_float = finite_float(left)
+    right_float = finite_float(right)
+    if left_float is None or right_float is None:
+        return left == right
+    return bool(np.isclose(left_float, right_float, rtol=1e-12, atol=1e-12, equal_nan=True))
+
+
+def diagnostics_changed_metric_outputs(
+    rr_ms: np.ndarray,
+    args: argparse.Namespace,
+    diagnostic_results: Dict[str, Any],
+) -> Optional[bool]:
+    if not args.enable_diagnostics:
+        return None
+
+    baseline = HRVFreqDomainAnalysis(
+        rr_ms,
+        sampling_rate=args.interpolation_rate,
+        detrend_method=normalize_detrend_method(args.detrend_method),
+        detrend_lambda=args.detrend_lambda,
+        window_type=args.window_type,
+        segment_length=args.segment_length,
+        overlap_ratio=args.overlap_ratio,
+        ar_order=args.ar_order,
+        enable_diagnostics=False,
+    ).get_results()
+
+    for key in diagnostic_metric_keys(baseline):
+        if key not in diagnostic_results:
+            return True
+        if not metric_values_equal(baseline.get(key), diagnostic_results.get(key)):
+            return True
+    return False
+
+
+def summarize_observations(
+    rows: List[Dict[str, object]],
+    diagnostics_records: List[Dict[str, Any]],
+    failures: List[Tuple[Path, Exception]],
+) -> List[str]:
+    rows_by_file: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        rows_by_file.setdefault(str(row.get("input_file", "")), row)
+
+    processed_files = sorted(path for path in rows_by_file if path)
+    processed_count = len(processed_files)
+    failed_count = len(failures)
+
+    lines = [
+        "## Auto-generated observations",
+        "",
+        "This draft is generated from validation outputs for manual review. It reports descriptive summaries only and does not make scientific or causal conclusions.",
+        "",
+        f"- Files processed successfully: {processed_count}",
+    ]
+    if failed_count:
+        lines.append(f"- Files not processed due to errors: {failed_count}")
+
+    durations = [
+        value
+        for value in (
+            finite_float(rows_by_file[path].get("native_recording_duration_s"))
+            for path in processed_files
+        )
+        if value is not None
+    ]
+    if durations:
+        lines.append(
+            "- Recording duration, seconds: "
+            f"mean {format_float(float(np.mean(durations)))}, "
+            f"min {format_float(float(np.min(durations)))}, "
+            f"max {format_float(float(np.max(durations)))}"
+        )
+    else:
+        lines.append("- Recording duration, seconds: not available")
+
+    diagnostics_by_file = {
+        str(record.get("input_file", "")): record.get("frequency_diagnostics", {})
+        for record in diagnostics_records
+    }
+    if diagnostics_by_file:
+        duration_warning_count = sum(
+            1
+            for path in processed_files
+            if diagnostics_by_file.get(path, {}).get("duration_warnings")
+        )
+    else:
+        duration_warning_count = sum(
+            1
+            for path in processed_files
+            if (finite_float(rows_by_file[path].get("native_recording_duration_s")) or 0.0) < 300.0
+        )
+    lines.append(
+        "- Files triggering duration warnings: "
+        f"{format_count_pct(duration_warning_count, processed_count)}"
+    )
+
+    for band in ["vlf", "lf", "hf"]:
+        count = sum(
+            1
+            for path in processed_files
+            if (finite_float(rows_by_file[path].get(f"native_bins_{band}")) or 0.0) < 2.0
+        )
+        lines.append(
+            f"- Files with <2 {band.upper()} bins in native Welch PSD: "
+            f"{format_count_pct(count, processed_count)}"
+        )
+
+    lines.extend(["", "Mean relative errors:"])
+    for metric in METRICS:
+        metric_errors = [
+            value
+            for value in (
+                finite_float(row.get("relative_error"))
+                for row in rows
+                if row.get("metric") == metric
+            )
+            if value is not None
+        ]
+        if metric_errors:
+            mean_error = float(np.mean(metric_errors))
+            lines.append(f"- {metric}: {mean_error:.4f} ({mean_error * 100.0:.2f}%)")
+        else:
+            lines.append(f"- {metric}: not available")
+
+    diagnostic_change_values = {
+        path: rows_by_file[path].get("diagnostics_changed_metric_outputs")
+        for path in processed_files
+        if rows_by_file[path].get("diagnostics_changed_metric_outputs") is not None
+    }
+    if diagnostic_change_values:
+        changed_count = sum(1 for changed in diagnostic_change_values.values() if changed)
+        lines.append(
+            "- Diagnostics changed metric outputs: "
+            f"{format_count_pct(changed_count, len(diagnostic_change_values))}"
+        )
+    else:
+        lines.append(
+            "- Diagnostics changed metric outputs: not assessed in this run "
+            "(diagnostics were disabled or no diagnostic comparison was recorded)"
+        )
+
+    if diagnostics_by_file:
+        ar_fallback_count = 0
+        variance_warning_count = 0
+        for path in processed_files:
+            diagnostics = diagnostics_by_file.get(path, {})
+            ar_diagnostics = diagnostics.get("ar", {})
+            if ar_diagnostics.get("fallback_reason") or ar_diagnostics.get("estimator_used") == "welch_fallback":
+                ar_fallback_count += 1
+            variance_warning = any(
+                diagnostics.get(method, {}).get("warning")
+                for method in ["fft", "ar"]
+            )
+            if variance_warning:
+                variance_warning_count += 1
+        lines.append(
+            f"- AR fallbacks reported in diagnostics: {format_count_pct(ar_fallback_count, processed_count)}"
+        )
+        lines.append(
+            "- Files with variance consistency warnings: "
+            f"{format_count_pct(variance_warning_count, processed_count)}"
+        )
+    else:
+        lines.append("- AR fallbacks reported in diagnostics: not available")
+        lines.append("- Files with variance consistency warnings: not available")
+
+    lines.extend(
+        [
+            "",
+            "Observed discrepancies are consistent with a descriptive validation comparison where recording duration and PSD bin coverage vary across files. This statement should be reviewed manually and should not be read as a causal explanation.",
+            "",
+            "## Researcher interpretation",
+            "(To be completed manually)",
+            "",
+        ]
+    )
+    return lines
+
+
+def write_notes(
+    path: Path,
+    args: argparse.Namespace,
+    input_paths: List[Path],
+    output_files: List[Path],
+    rows: List[Dict[str, object]],
+    diagnostics_records: List[Dict[str, Any]],
+    failures: List[Tuple[Path, Exception]],
+) -> None:
+    settings = hrv_settings(args)
+    lines = [
+        f"# Validation Run: {args.run_name}",
+        "",
+        "## Purpose",
+        args.purpose,
+        "",
+        "## Validation Type",
+        "Frequency-domain HRV Studio vs NeuroKit2 comparison",
+        "",
+        "## Code State",
+        f"- Diagnostics enabled/disabled: {args.enable_diagnostics}",
+        "- Core PSD algorithms changed: No",
+        "- Welch changed: No",
+        "- FFT changed: No",
+        "- AR changed: No",
+        "",
+        "## Input Files",
+        *[f"- {path}" for path in input_paths],
+        "",
+        "## Settings",
+        f"- sampling_rate = {settings['sampling_rate']}",
+        f"- window_type = {settings['window_type']}",
+        f"- segment_length = {settings['segment_length']}",
+        f"- overlap_ratio = {settings['overlap_ratio']}",
+        f"- detrend_method = {settings['detrend_method']}",
+        f"- enable_diagnostics = {settings['enable_diagnostics']}",
+        "",
+        "## Outputs",
+        *[f"- {path.name}" for path in output_files],
+        "",
+        *summarize_observations(rows, diagnostics_records, failures),
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def resolve_inputs(inputs: Iterable[str], recursive: bool) -> List[Path]:
+    paths: List[Path] = []
+    for item in inputs:
+        matches = [Path(p) for p in glob.glob(item)]
+        candidates = matches if matches else [Path(item)]
+
+        for candidate in candidates:
+            if candidate.is_dir():
+                pattern = "**/*" if recursive else "*"
+                paths.extend(
+                    p
+                    for p in candidate.glob(pattern)
+                    if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES
+                )
+            elif candidate.is_file():
+                paths.append(candidate)
+
+    unique = sorted({p.resolve() for p in paths})
+    if not unique:
+        raise SystemExit("No input files found.")
+    return unique
+
+
+def load_rr_intervals_ms(path: Path) -> np.ndarray:
+    bundle = load_rr_file(str(path))
+    values = bundle.rri_ms or bundle.ppi_ms
+    if not values:
+        raise ValueError("No RRI/PPI intervals found in file.")
+    return np.asarray(values, dtype=float)
+
+
+def normalize_detrend_method(value: str) -> Optional[str]:
+    return None if value == "none" else value
+
+
+def effective_welch_params(analyzer: HRVFreqDomainAnalysis) -> Tuple[Optional[int], Optional[int]]:
+    n_samples = len(analyzer.time_domain_s)
+    if n_samples == 0:
+        return None, None
+
+    requested = int(analyzer.segment_length * analyzer.sampling_rate)
+    nperseg = min(requested, n_samples)
+    if analyzer.welch_shorten_if_short and nperseg == n_samples and nperseg >= 16:
+        nperseg = max(8, n_samples // 2)
+    if nperseg < 8:
+        return None, None
+    return nperseg, int(nperseg * analyzer.overlap_ratio)
+
+
+def detrended_ar_input(analyzer: HRVFreqDomainAnalysis) -> Optional[np.ndarray]:
+    if len(analyzer.time_domain_s) == 0:
+        return None
+
+    if analyzer.detrend_method == "smoothness_priors":
+        if getattr(analyzer, "_smoothness_priors_applied", False):
+            detrended = analyzer.time_domain_s
+        else:
+            detrended = signal.detrend(analyzer.time_domain_s, type="linear")
+    elif analyzer.detrend_method == "linear":
+        detrended = signal.detrend(analyzer.time_domain_s, type="linear")
+    elif analyzer.detrend_method == "constant":
+        detrended = signal.detrend(analyzer.time_domain_s, type="constant")
+    else:
+        detrended = analyzer.time_domain_s.copy()
+
+    return detrended - np.mean(detrended)
+
+
+def effective_ar_order(analyzer: HRVFreqDomainAnalysis) -> Optional[int]:
+    ar_input = detrended_ar_input(analyzer)
+    if ar_input is None or len(ar_input) < 8:
+        return None
+
+    n = len(ar_input)
+    adaptive_order = min(analyzer.ar_order, max(4, n // 6))
+    adaptive_order = max(4, adaptive_order)
+
+    for order in range(adaptive_order, 3, -1):
+        burg = analyzer._burg_try(ar_input, order)
+        if burg is not None:
+            return order
+        yule_walker = analyzer._yule_walker_estimate(ar_input, order)
+        if yule_walker is not None:
+            return order
+    return None
+
+
+def band_ranges() -> Dict[str, Tuple[float, float]]:
+    bands = dict(HRVFreqDomainAnalysis.DEFAULT_FREQ_BANDS)
+    return {
+        "ulf": bands["ulf"],
+        "vlf": bands["vlf"],
+        "lf": bands["lf"],
+        "hf": bands["hf"],
+        "total": (bands["vlf"][0], bands["hf"][1]),
+    }
+
+
+def count_bins(freqs: np.ndarray, low: float, high: float) -> int:
+    if len(freqs) == 0:
+        return 0
+    return int(np.count_nonzero((freqs >= low) & (freqs <= high)))
+
+
+def band_bin_counts(freqs: np.ndarray) -> Dict[str, int]:
+    ranges = band_ranges()
+    counts = {name: count_bins(freqs, low, high) for name, (low, high) in ranges.items()}
+    counts["lf_hf"] = counts["lf"] + counts["hf"]
+    return counts
+
+
+def integrate_band(freqs: np.ndarray, psd: np.ndarray, low: float, high: float) -> float:
+    mask = (freqs >= low) & (freqs <= high)
+    if not np.any(mask):
+        return 0.0
+    return float(max(0.0, np.trapezoid(psd[mask], freqs[mask])))
+
+
+def metrics_from_psd(freqs: np.ndarray, psd: np.ndarray) -> Dict[str, float]:
+    ranges = band_ranges()
+    vlf = integrate_band(freqs, psd, *ranges["vlf"])
+    lf = integrate_band(freqs, psd, *ranges["lf"])
+    hf = integrate_band(freqs, psd, *ranges["hf"])
+    total = integrate_band(freqs, psd, *ranges["total"])
+
+    lf_hf = math.nan
+    if hf > 1e-10:
+        lf_hf = lf / hf
+    elif lf > 1e-10:
+        lf_hf = math.inf
+
+    lf_hf_sum = lf + hf
+    lf_nu = (lf / lf_hf_sum) * 100.0 if lf_hf_sum > 0 else 0.0
+    hf_nu = (hf / lf_hf_sum) * 100.0 if lf_hf_sum > 0 else 0.0
+
+    return {
+        "vlf_power": vlf,
+        "lf_power": lf,
+        "hf_power": hf,
+        "total_power": total,
+        "lf_hf_ratio": lf_hf,
+        "lf_nu": lf_nu,
+        "hf_nu": hf_nu,
+    }
+
+
+def rr_start_times_s(rr_ms: np.ndarray) -> np.ndarray:
+    rr_s = rr_ms.astype(float) / 1000.0
+    return np.concatenate([[0.0], np.cumsum(rr_s[:-1])])
+
+
+def apply_matching_detrend_ms(
+    signal_ms: np.ndarray,
+    detrend_method: Optional[str],
+    detrend_lambda: float,
+) -> np.ndarray:
+    if detrend_method == "linear":
+        return signal.detrend(signal_ms, type="linear")
+    if detrend_method == "constant":
+        return signal.detrend(signal_ms, type="constant")
+    if detrend_method == "smoothness_priors":
+        detrended_s = detrend_uniform_with_smoothness_priors(
+            signal_ms / 1000.0,
+            lambda_param=detrend_lambda,
+            return_trend=False,
+        )
+        return detrended_s * 1000.0
+    return signal_ms.copy()
+
+
+def neurokit2_welch_psd(
+    rr_ms: np.ndarray,
+    sampling_rate: float,
+    interpolation_method: str,
+    window_type: str,
+    nperseg: int,
+    noverlap: int,
+    detrend_method: Optional[str],
+    detrend_lambda: float,
+) -> Tuple[np.ndarray, np.ndarray, int, int, float]:
+    import neurokit2 as nk
+
+    rri_time = rr_start_times_s(rr_ms)
+    intervals, intervals_time, interpolation_rate = nk.intervals_process(
+        rr_ms,
+        intervals_time=rri_time,
+        interpolate=True,
+        interpolation_rate=sampling_rate,
+        method=interpolation_method,
+    )
+    intervals = apply_matching_detrend_ms(
+        np.asarray(intervals, dtype=float),
+        detrend_method,
+        detrend_lambda,
+    )
+
+    effective_nperseg = min(int(nperseg), len(intervals))
+    effective_noverlap = min(int(noverlap), max(0, effective_nperseg - 1))
+    if effective_nperseg < 8:
+        return np.array([]), np.array([]), effective_nperseg, effective_noverlap, 0.0
+
+    psd = nk.signal_psd(
+        intervals,
+        sampling_rate=interpolation_rate,
+        method="welch",
+        normalize=False,
+        min_frequency=-np.inf,
+        max_frequency=band_ranges()["total"][1],
+        window=effective_nperseg / interpolation_rate,
+        window_type=window_type,
+        noverlap=effective_noverlap,
+        silent=True,
+    )
+
+    duration_s = float(intervals_time[-1] - intervals_time[0]) if len(intervals_time) else 0.0
+    return (
+        psd["Frequency"].to_numpy(dtype=float),
+        psd["Power"].to_numpy(dtype=float),
+        effective_nperseg,
+        effective_noverlap,
+        duration_s,
+    )
+
+
+def experimental_native_welch_psd(
+    analyzer: HRVFreqDomainAnalysis,
+    nperseg: Optional[int],
+    noverlap: Optional[int],
+    nfft_multiplier: float,
+) -> Tuple[np.ndarray, np.ndarray, Optional[int]]:
+    if nperseg is None or noverlap is None or nfft_multiplier <= 1.0:
+        return np.array([]), np.array([]), None
+
+    nfft = int(round(float(nperseg) * nfft_multiplier))
+    if nfft < nperseg:
+        nfft = nperseg
+
+    window = analyzer._get_window(nperseg)
+    if analyzer.detrend_method == "smoothness_priors":
+        if getattr(analyzer, "_smoothness_priors_applied", False):
+            signal_input = analyzer.time_domain_s
+            detrend_param: Any = False
+        else:
+            signal_input = analyzer.time_domain_s
+            detrend_param = "linear"
+    else:
+        signal_input = analyzer.time_domain_s
+        detrend_param = analyzer.detrend_method if analyzer.detrend_method else False
+
+    freqs, psd_seconds = signal.welch(
+        x=signal_input,
+        fs=analyzer.sampling_rate,
+        window=window,
+        nperseg=nperseg,
+        noverlap=noverlap,
+        nfft=nfft,
+        detrend=detrend_param,
+        scaling="density",
+        average="mean",
+    )
+    return freqs, psd_seconds * 1e6, nfft
+
+
+def relative_error(native_value: float, reference_value: float) -> float:
+    if not np.isfinite(native_value) or not np.isfinite(reference_value):
+        return math.nan
+    denominator = abs(reference_value)
+    if denominator <= 1e-12:
+        return math.nan
+    return abs(native_value - reference_value) / denominator
+
+
+def safe_abs_error(native_value: float, reference_value: float) -> float:
+    if not np.isfinite(native_value) or not np.isfinite(reference_value):
+        return math.nan
+    return abs(native_value - reference_value)
+
+
+def analyze_file(path: Path, args: argparse.Namespace) -> Tuple[List[Dict[str, object]], Optional[Dict[str, Any]]]:
+    detrend_method = normalize_detrend_method(args.detrend_method)
+    raw_rr_ms = load_rr_intervals_ms(path)
+
+    analyzer = HRVFreqDomainAnalysis(
+        raw_rr_ms,
+        sampling_rate=args.interpolation_rate,
+        detrend_method=detrend_method,
+        detrend_lambda=args.detrend_lambda,
+        window_type=args.window_type,
+        segment_length=args.segment_length,
+        overlap_ratio=args.overlap_ratio,
+        ar_order=args.ar_order,
+        enable_diagnostics=args.enable_diagnostics,
+    )
+    native_results = analyzer.get_results()
+    diagnostics = None
+    if args.enable_diagnostics:
+        diagnostics = {
+            "input_file": str(path),
+            "frequency_diagnostics": native_results.get("frequency_diagnostics", {}),
+        }
+    diagnostics_changed_outputs = diagnostics_changed_metric_outputs(
+        raw_rr_ms,
+        args,
+        native_results,
+    )
+
+    native_nperseg, native_noverlap = effective_welch_params(analyzer)
+    ar_order = effective_ar_order(analyzer)
+
+    rr_ms = analyzer.rr_intervals_ms
+    native_duration_s = float(rr_start_times_s(rr_ms)[-1]) if len(rr_ms) > 1 else 0.0
+    native_counts = band_bin_counts(analyzer.freqs)
+
+    if native_nperseg is None or native_noverlap is None:
+        nk_freqs = np.array([])
+        nk_psd = np.array([])
+        nk_nperseg = None
+        nk_noverlap = None
+        nk_duration_s = 0.0
+    else:
+        nk_freqs, nk_psd, nk_nperseg, nk_noverlap, nk_duration_s = neurokit2_welch_psd(
+            rr_ms=rr_ms,
+            sampling_rate=args.interpolation_rate,
+            interpolation_method=args.neurokit_interpolation_method,
+            window_type=args.window_type,
+            nperseg=native_nperseg,
+            noverlap=native_noverlap,
+            detrend_method=detrend_method,
+            detrend_lambda=args.detrend_lambda,
+        )
+
+    nk_metrics = metrics_from_psd(nk_freqs, nk_psd)
+    nk_counts = band_bin_counts(nk_freqs)
+    experimental_freqs, experimental_psd, experimental_nfft = experimental_native_welch_psd(
+        analyzer,
+        native_nperseg,
+        native_noverlap,
+        args.experimental_native_welch_nfft_multiplier,
+    )
+    experimental_metrics = metrics_from_psd(experimental_freqs, experimental_psd)
+    experimental_counts = band_bin_counts(experimental_freqs)
+
+    rows = []
+    for label, key in METRICS.items():
+        native_value = float(native_results.get(f"welch_{key}", native_results.get(key, math.nan)))
+        nk_value = float(nk_metrics.get(key, math.nan))
+        metric_band = BAND_FOR_METRIC[label]
+        experimental_value = float(experimental_metrics.get(key, math.nan))
+
+        row = {
+            "input_file": str(path),
+            "metric": label,
+            "native_value": native_value,
+            "neurokit2_value": nk_value,
+            "absolute_error": safe_abs_error(native_value, nk_value),
+            "relative_error": relative_error(native_value, nk_value),
+            "relative_error_pct": relative_error(native_value, nk_value) * 100.0,
+            "metric_band": metric_band,
+            "native_metric_band_bins": native_counts.get(metric_band, 0),
+            "neurokit2_metric_band_bins": nk_counts.get(metric_band, 0),
+            "native_bins_ulf": native_counts["ulf"],
+            "native_bins_vlf": native_counts["vlf"],
+            "native_bins_lf": native_counts["lf"],
+            "native_bins_hf": native_counts["hf"],
+            "native_bins_total": native_counts["total"],
+            "neurokit2_bins_ulf": nk_counts["ulf"],
+            "neurokit2_bins_vlf": nk_counts["vlf"],
+            "neurokit2_bins_lf": nk_counts["lf"],
+            "neurokit2_bins_hf": nk_counts["hf"],
+            "neurokit2_bins_total": nk_counts["total"],
+            "native_welch_nperseg": native_nperseg,
+            "native_welch_noverlap": native_noverlap,
+            "neurokit2_welch_nperseg": nk_nperseg,
+            "neurokit2_welch_noverlap": nk_noverlap,
+            "effective_ar_order": ar_order,
+            "rr_count": len(rr_ms),
+            "native_recording_duration_s": native_duration_s,
+            "neurokit2_recording_duration_s": nk_duration_s,
+            "diagnostics_changed_metric_outputs": diagnostics_changed_outputs,
+            "interpolation_rate_hz": args.interpolation_rate,
+            "window_type": args.window_type,
+            "segment_length_s": args.segment_length,
+            "overlap_ratio": args.overlap_ratio,
+            "detrend_method": args.detrend_method,
+            "neurokit2_interpolation_method": args.neurokit_interpolation_method,
+        }
+        if experimental_nfft is not None:
+            row.update(
+                {
+                    "experimental_native_welch_nfft_multiplier": args.experimental_native_welch_nfft_multiplier,
+                    "experimental_native_welch_nfft": experimental_nfft,
+                    "experimental_native_welch_frequency_resolution_hz": (
+                        args.interpolation_rate / experimental_nfft
+                    ),
+                    "experimental_native_value": experimental_value,
+                    "experimental_absolute_error": safe_abs_error(experimental_value, nk_value),
+                    "experimental_relative_error": relative_error(experimental_value, nk_value),
+                    "experimental_relative_error_pct": (
+                        relative_error(experimental_value, nk_value) * 100.0
+                    ),
+                    "experimental_native_metric_band_bins": experimental_counts.get(metric_band, 0),
+                    "experimental_native_bins_ulf": experimental_counts["ulf"],
+                    "experimental_native_bins_vlf": experimental_counts["vlf"],
+                    "experimental_native_bins_lf": experimental_counts["lf"],
+                    "experimental_native_bins_hf": experimental_counts["hf"],
+                    "experimental_native_bins_total": experimental_counts["total"],
+                }
+            )
+        rows.append(row)
+    return rows, diagnostics
+
+
+def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
+    if not rows:
+        return
+    fieldnames = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    args = parse_args()
+    input_paths = resolve_inputs(args.inputs, args.recursive)
+    run_dir = prepare_run_directory(args.run_name, args.overwrite)
+
+    rows: List[Dict[str, object]] = []
+    diagnostics_records: List[Dict[str, Any]] = []
+    failures = []
+    for path in input_paths:
+        try:
+            file_rows, diagnostics = analyze_file(path, args)
+            rows.extend(file_rows)
+            if diagnostics is not None:
+                diagnostics_records.append(diagnostics)
+        except Exception as exc:
+            failures.append((path, exc))
+
+    output_path = run_dir / Path(args.output).name
+    write_csv(output_path, rows)
+
+    output_files = [output_path] if rows else []
+    if diagnostics_records:
+        diagnostics_json = run_dir / "diagnostics.json"
+        diagnostics_csv = run_dir / "diagnostics.csv"
+        write_json(diagnostics_json, diagnostics_records)
+        write_csv(diagnostics_csv, [flatten_dict(record) for record in diagnostics_records])
+        output_files.extend([diagnostics_csv, diagnostics_json])
+
+    run_info_path = run_dir / "run_info.json"
+    notes_path = run_dir / "notes.md"
+    write_json(run_info_path, build_run_info(args, input_paths, run_dir, failures))
+    write_notes(
+        notes_path,
+        args,
+        input_paths,
+        output_files + [run_info_path],
+        rows,
+        diagnostics_records,
+        failures,
+    )
+    output_files.extend([run_info_path, notes_path])
+
+    print(f"Wrote {len(rows)} comparison rows for {len(input_paths) - len(failures)} files: {output_path}")
+
+    if failures:
+        print("Failures:")
+        for path, exc in failures:
+            print(f"  {path}: {exc}")
+
+    if not rows:
+        raise SystemExit("No validation rows were produced.")
+
+
+if __name__ == "__main__":
+    main()

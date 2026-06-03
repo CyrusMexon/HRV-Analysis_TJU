@@ -28,3 +28,42 @@ pipeline_trace.txt
 # Utility scripts
 scan_components.py
 trace_pipeline.py
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# HRV validation local data and generated outputs
+validation/raw_data/*
+!validation/raw_data/.gitkeep
+
+validation/processed_data/*
+!validation/processed_data/.gitkeep
+
+validation/runs/*
+!validation/runs/.gitkeep
+
+validation/**/*.csv
+validation/**/*.json
+validation/**/*.png
+validation/**/*.jpg
+validation/**/*.jpeg
+validation/**/*.pdf
+
+# Keep lightweight validation documentation and notes tracked
+!validation/README_validation.md
+!validation/research_notes/
+!validation/research_notes/**
+!validation/**/.gitkeep
+
+# Local generated HRV exports and exploratory data files
+HRV_*_metrics.csv
+HRV_*_audit_trail.json
+HRV_*.pdf
+f1y01.csv
+f1y01.txt
+psd_scaling_comparison.png
+tree.txt
+data/*.txt
+test_data/*.dat
+test_data/*.ecg
+test_data/*.hea
