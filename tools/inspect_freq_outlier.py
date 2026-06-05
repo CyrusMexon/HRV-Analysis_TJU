@@ -753,7 +753,8 @@ def main() -> int:
         nk_psd = np.array([])
         nk_nperseg = None
     else:
-        nk_freqs, nk_psd, nk_nperseg, _nk_noverlap, _nk_duration = neurokit2_welch_psd(
+        nk_freqs, nk_psd, nk_nperseg, _nk_noverlap, _nk_duration, _nk_adjustment = neurokit2_welch_psd(
+            path=input_path,
             rr_ms=analyzer.rr_intervals_ms,
             sampling_rate=args.interpolation_rate,
             interpolation_method=args.neurokit_interpolation_method,

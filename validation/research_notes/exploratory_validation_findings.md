@@ -300,6 +300,26 @@ Common warning patterns included:
 
 These warnings support cautious interpretation, especially for short recordings and low-frequency bands.
 
+## Confirmed finding: Welch segment detrending drives VLF discrepancy
+
+After the PhysioNet 10-minute manual inspections, a validation-only A/B experiment isolated the effect of Welch segment detrending on the near-zero-frequency discrepancy. The representative files were:
+
+- `nsr023_segment_131.csv`
+- `nsr037_segment_131.csv`
+- `nsr043_segment_135.csv`
+- `nsr022_segment_022.csv`
+
+The experiment kept preprocessing and Welch settings fixed: RR intervals were interpolated to 4 Hz, one global linear detrend was applied to the full uniformly sampled RR signal, and Welch used a Hann window with `nperseg=480`, `noverlap=360`, `nfft=960`, `scaling="density"`, and `average="mean"`. Only the Welch detrending argument changed:
+
+- Arm A: globally detrended RR signal plus `scipy.signal.welch(detrend=False)`.
+- Arm B: globally detrended RR signal plus `scipy.signal.welch(detrend="linear")`.
+
+The key result was consistent across the representative files. Arm A reproduced NeuroKit2-like VLF values. Arm B collapsed VLF toward HRV Studio-like values. LF/HF remained nearly unchanged across both arms, with less than 0.1% relative change in the representative files.
+
+This confirms that VLF and total_power are highly sensitive to the Welch segment-detrending convention. LF, HF, LF/HF, LFnu, and HFnu were highly stable under the same A/B change, which supports the conclusion that HRV Studio's frequency-domain implementation is not broadly wrong. The main observed difference is methodological near-zero-frequency handling, concentrated at DC and the first VLF bins, rather than a broad PSD scaling or shape bug.
+
+This does not prove which convention is correct. It shows that cross-software VLF and total_power validation requires explicit documentation of whether detrending is applied globally before Welch, within each Welch segment, or both. A Kubios subset remains important for deciding which convention is the most appropriate external reference for final reporting.
+
 ## 5. Lessons for Next Validation Phase
 
 ### Why PhysioNet NSR is Needed
@@ -371,4 +391,3 @@ The Syl_Vain exploratory phase justified moving to the main PhysioNet NSR valida
 - nfft/bin-grid alignment improves agreement but is not sufficient;
 - artifact/interpolation mismatch and localized VLF discrepancy are distinct cases;
 - final validation needs longer, cleaner, reproducibly segmented data and at least one additional external-software subset.
-

@@ -54,6 +54,7 @@ LONG_DURATION_OUTLIER_COLUMNS = [
     "native_metric_band_bins",
     "neurokit2_metric_band_bins",
     "detrend_method",
+    "welch_detrend_mode",
     "warnings",
 ]
 
@@ -339,6 +340,7 @@ def enrich_rows(
                 "native_metric_band_bins": to_float(row.get("native_metric_band_bins")),
                 "neurokit2_metric_band_bins": to_float(row.get("neurokit2_metric_band_bins")),
                 "detrend_method": row.get("detrend_method", ""),
+                "welch_detrend_mode": row.get("welch_detrend_mode", ""),
                 "warnings": warnings,
                 "experimental_native_value": to_float(row.get("experimental_native_value")),
                 "experimental_absolute_error": to_float(row.get("experimental_absolute_error")),
@@ -399,6 +401,28 @@ def metric_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             }
         )
     return summaries
+
+
+def welch_mode_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    counter = Counter(
+        str(row.get("welch_detrend_mode") or "not recorded")
+        for row in rows
+    )
+    return [
+        {
+            "section": "welch_detrend_mode",
+            "welch_detrend_mode": mode,
+            "rows": count,
+            "files": len(
+                {
+                    normalize_file_key(row.get("input_file"))
+                    for row in rows
+                    if str(row.get("welch_detrend_mode") or "not recorded") == mode
+                }
+            ),
+        }
+        for mode, count in counter.most_common()
+    ]
 
 
 def has_experimental_columns(rows: List[Dict[str, Any]]) -> bool:
@@ -580,6 +604,7 @@ def outlier_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "native_metric_band_bins": row["native_metric_band_bins"],
                 "neurokit2_metric_band_bins": row["neurokit2_metric_band_bins"],
                 "detrend_method": row["detrend_method"],
+                "welch_detrend_mode": row["welch_detrend_mode"],
                 "warnings": row["warnings"],
             }
         )
@@ -641,6 +666,7 @@ def long_duration_outlier_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any
                 "native_metric_band_bins": row["native_metric_band_bins"],
                 "neurokit2_metric_band_bins": row["neurokit2_metric_band_bins"],
                 "detrend_method": row["detrend_method"],
+                "welch_detrend_mode": row["welch_detrend_mode"],
                 "warnings": row["warnings"],
             }
         )
@@ -921,6 +947,7 @@ def build_markdown(
     run_name: str,
     diagnostics_source: str,
     rows: List[Dict[str, Any]],
+    welch_mode_rows: List[Dict[str, Any]],
     summaries: List[Dict[str, Any]],
     outliers: List[Dict[str, Any]],
     duration_rows: List[Dict[str, Any]],
@@ -972,6 +999,13 @@ def build_markdown(
         (
             f"- Analyzed {len(rows)} metric rows across {total_files} files using "
             f"{diagnostics_source} for warning detail."
+        ),
+        (
+            "- Welch detrending mode(s): "
+            + ", ".join(
+                f"{row['welch_detrend_mode']} ({row['files']} files)"
+                for row in welch_mode_rows
+            )
         ),
         (
             f"- {high_error_rows} rows exceed 20% relative error and "
@@ -1031,6 +1065,21 @@ def build_markdown(
                 ("outliers_gt_20_pct", ">20%"),
                 ("outliers_gt_50_pct", ">50%"),
                 ("outliers_gt_80_pct", ">80%"),
+            ],
+        ),
+        "## Welch detrending mode",
+        "",
+        (
+            "This records the validation comparator mode when present in the validation CSV. "
+            "`current` means the historical NeuroKit2 validation path was preserved."
+        ),
+        "",
+        markdown_table(
+            welch_mode_rows,
+            [
+                ("welch_detrend_mode", "Mode"),
+                ("rows", "Rows"),
+                ("files", "Files"),
             ],
         ),
         ]
@@ -1150,6 +1199,7 @@ def build_markdown(
                 ("native_metric_band_bins", "Native band bins"),
                 ("neurokit2_metric_band_bins", "NK2 band bins"),
                 ("detrend_method", "Detrend"),
+                ("welch_detrend_mode", "Welch detrend mode"),
                 ("warnings", "Warnings"),
             ],
             args.top_outliers,
@@ -1223,6 +1273,7 @@ def build_markdown(
                 ("native_metric_band_bins", "Native band bins"),
                 ("neurokit2_metric_band_bins", "NK2 band bins"),
                 ("detrend_method", "Detrend"),
+                ("welch_detrend_mode", "Welch detrend mode"),
                 ("warnings", "Warnings"),
             ],
             10,
@@ -1277,6 +1328,10 @@ def build_markdown(
         "## Recommended interpretation",
         "",
         (
+            "- Welch detrending mode should be considered when interpreting VLF and total_power agreement. "
+            "`global_then_none` and segment-wise linear detrending can differ mainly at DC and the first VLF bins."
+        ),
+        (
             "- Large absolute-power discrepancies with aligned LF/HF and normalized-unit metrics are consistent with a scaling, integration, or total-power normalization difference rather than a wholesale change in relative spectral distribution."
         ),
         (
@@ -1310,6 +1365,7 @@ def build_markdown(
 def append_notes(
     run_dir: Path,
     run_name: str,
+    welch_mode_rows: List[Dict[str, Any]],
     summaries: List[Dict[str, Any]],
     outliers: List[Dict[str, Any]],
     abs_norm_rows: List[Dict[str, Any]],
@@ -1331,6 +1387,13 @@ def append_notes(
         (
             f"- Diagnostic summary files were generated for `{run_name}`: "
             "`diagnostic_summary.md` and `diagnostic_summary.csv`."
+        ),
+        (
+            "- Welch detrending mode(s): "
+            + ", ".join(
+                f"{row['welch_detrend_mode']} ({row['files']} files)"
+                for row in welch_mode_rows
+            )
         ),
         (
             f"- {len(outliers)} metric rows exceed 20% relative error; "
@@ -1389,6 +1452,7 @@ def main() -> int:
     if not rows:
         raise SystemExit("No supported metric rows found in validation CSV.")
 
+    welch_mode_rows = welch_mode_summary(rows)
     summaries = metric_summary(rows)
     outliers = outlier_rows(rows)
     duration_rows = duration_summary(rows)
@@ -1448,6 +1512,7 @@ def main() -> int:
         )
 
     csv_rows: List[Dict[str, Any]] = []
+    csv_rows.extend(welch_mode_rows)
     csv_rows.extend(summaries)
     csv_rows.extend(nfft_comparison_rows)
     csv_rows.extend(duration_rows)
@@ -1461,6 +1526,7 @@ def main() -> int:
         args.run_name,
         diagnostics_source,
         rows,
+        welch_mode_rows,
         summaries,
         outliers,
         duration_rows,
@@ -1490,6 +1556,7 @@ def main() -> int:
         append_notes(
             run_dir,
             args.run_name,
+            welch_mode_rows,
             summaries,
             outliers,
             abs_norm_rows,

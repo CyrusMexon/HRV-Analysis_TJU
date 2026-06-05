@@ -61,6 +61,22 @@ BAND_FOR_METRIC = {
 }
 
 SUPPORTED_SUFFIXES = {".csv", ".txt", ".edf", ".hrm", ".fit", ".sml", ".json", ".acq"}
+MIN_EFFECTIVE_WELCH_SAMPLES = 8
+
+
+class ValidationSkip(Exception):
+    """Expected validation-only skip that should not be treated as a failure."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.details = details or {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,6 +133,18 @@ def parse_args() -> argparse.Namespace:
             "Validation-only experiment: recompute native Welch metrics with "
             "nfft = multiplier * nperseg and add comparison columns. "
             "Default HRV Studio behavior is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--welch-detrend-mode",
+        choices=["current", "segment_linear", "global_then_none"],
+        default="current",
+        help=(
+            "Validation-only NeuroKit2 comparator Welch detrending mode. "
+            "'current' preserves existing behavior exactly. 'segment_linear' "
+            "uses segment-wise linear detrending inside Welch. 'global_then_none' "
+            "globally detrends the interpolated RR signal first, then runs Welch "
+            "with detrend=False to mimic NeuroKit2-style near-zero behavior."
         ),
     )
     return parser.parse_args()
@@ -227,6 +255,36 @@ def format_count_pct(count: Optional[int], total: int) -> str:
     return f"{count}/{total} ({pct:.1f}%)"
 
 
+def is_metadata_csv(path: Path) -> bool:
+    if path.suffix.lower() != ".csv":
+        return False
+
+    name = path.name.lower()
+    stem = path.stem.lower()
+    return (
+        "manifest" in name
+        or stem.endswith("_manifest")
+        or "dataset_summary" in stem
+        or "quality_report" in stem
+    )
+
+
+def file_event(
+    path: Path,
+    reason: str,
+    message: str,
+    processed: bool = False,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "input_file": str(path),
+        "reason": reason,
+        "message": message,
+        "processed": processed,
+        "details": details or {},
+    }
+
+
 def hrv_settings(args: argparse.Namespace) -> Dict[str, Any]:
     return {
         "sampling_rate": args.interpolation_rate,
@@ -238,6 +296,7 @@ def hrv_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "ar_order": args.ar_order,
         "enable_diagnostics": args.enable_diagnostics,
         "experimental_native_welch_nfft_multiplier": args.experimental_native_welch_nfft_multiplier,
+        "welch_detrend_mode": args.welch_detrend_mode,
     }
 
 
@@ -246,6 +305,7 @@ def neurokit2_settings(args: argparse.Namespace) -> Dict[str, Any]:
         "interpolation_rate": args.interpolation_rate,
         "interpolation_method": args.neurokit_interpolation_method,
         "normalize": False,
+        "welch_detrend_mode": args.welch_detrend_mode,
     }
 
 
@@ -254,14 +314,17 @@ def build_run_info(
     input_paths: List[Path],
     run_dir: Path,
     failures: List[Tuple[Path, Exception]],
+    file_events: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     git_status = git_output("status", "--short")
+    skipped_files = [event for event in file_events if not event.get("processed")]
     return {
         "run_name": args.run_name,
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         "validation_script": str(Path(__file__).resolve().relative_to(PROJECT_ROOT)),
         "purpose": args.purpose,
         "validation_type": "frequency_domain_neurokit2_comparison",
+        "welch_detrend_mode": args.welch_detrend_mode,
         "git_commit_hash": git_output("rev-parse", "HEAD"),
         "git_dirty_status": "clean" if git_status == "" else git_status,
         "input_files": [str(path) for path in input_paths],
@@ -270,6 +333,9 @@ def build_run_info(
         "neurokit2_settings": neurokit2_settings(args),
         "software_versions": software_versions(),
         "failures": [{"input_file": str(path), "error": str(exc)} for path, exc in failures],
+        "skipped_files": skipped_files,
+        "file_events": file_events,
+        "skipped_file_count": len(skipped_files),
     }
 
 
@@ -482,8 +548,15 @@ def write_notes(
     rows: List[Dict[str, object]],
     diagnostics_records: List[Dict[str, Any]],
     failures: List[Tuple[Path, Exception]],
+    file_events: List[Dict[str, Any]],
 ) -> None:
     settings = hrv_settings(args)
+    skipped_events = [event for event in file_events if not event.get("processed")]
+    adjusted_events = [
+        event
+        for event in file_events
+        if event.get("reason") == "adjusted_noverlap_for_short_signal"
+    ]
     lines = [
         f"# Validation Run: {args.run_name}",
         "",
@@ -503,12 +576,21 @@ def write_notes(
         "## Input Files",
         *[f"- {path}" for path in input_paths],
         "",
+        "## Skipped or Adjusted Files",
+        f"- Skipped files: {len(skipped_events)}",
+        f"- Files with adjusted Welch overlap: {len(adjusted_events)}",
+        *[
+            f"- {event['reason']}: {event['input_file']} ({event['message']})"
+            for event in file_events
+        ],
+        "",
         "## Settings",
         f"- sampling_rate = {settings['sampling_rate']}",
         f"- window_type = {settings['window_type']}",
         f"- segment_length = {settings['segment_length']}",
         f"- overlap_ratio = {settings['overlap_ratio']}",
         f"- detrend_method = {settings['detrend_method']}",
+        f"- welch_detrend_mode = {settings['welch_detrend_mode']}",
         f"- enable_diagnostics = {settings['enable_diagnostics']}",
         "",
         "## Outputs",
@@ -519,8 +601,10 @@ def write_notes(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def resolve_inputs(inputs: Iterable[str], recursive: bool) -> List[Path]:
+def resolve_inputs(inputs: Iterable[str], recursive: bool) -> Tuple[List[Path], List[Dict[str, Any]]]:
     paths: List[Path] = []
+    file_events: List[Dict[str, Any]] = []
+    seen_events = set()
     for item in inputs:
         matches = [Path(p) for p in glob.glob(item)]
         candidates = matches if matches else [Path(item)]
@@ -528,18 +612,43 @@ def resolve_inputs(inputs: Iterable[str], recursive: bool) -> List[Path]:
         for candidate in candidates:
             if candidate.is_dir():
                 pattern = "**/*" if recursive else "*"
-                paths.extend(
-                    p
-                    for p in candidate.glob(pattern)
-                    if p.is_file() and p.suffix.lower() in SUPPORTED_SUFFIXES
-                )
+                for path in candidate.glob(pattern):
+                    if not path.is_file() or path.suffix.lower() not in SUPPORTED_SUFFIXES:
+                        continue
+                    if is_metadata_csv(path):
+                        resolved = path.resolve()
+                        if resolved not in seen_events:
+                            file_events.append(
+                                file_event(
+                                    resolved,
+                                    "metadata_file_skipped",
+                                    "Metadata CSV was skipped during input discovery.",
+                                )
+                            )
+                            seen_events.add(resolved)
+                        continue
+                    paths.append(path)
             elif candidate.is_file():
+                if is_metadata_csv(candidate):
+                    resolved = candidate.resolve()
+                    if resolved not in seen_events:
+                        file_events.append(
+                            file_event(
+                                resolved,
+                                "metadata_file_skipped",
+                                "Metadata CSV was skipped during input discovery.",
+                            )
+                        )
+                        seen_events.add(resolved)
+                    continue
                 paths.append(candidate)
 
     unique = sorted({p.resolve() for p in paths})
     if not unique:
+        if file_events:
+            raise SystemExit("No analyzable RR input files found after skipping metadata files.")
         raise SystemExit("No input files found.")
-    return unique
+    return unique, file_events
 
 
 def load_rr_intervals_ms(path: Path) -> np.ndarray:
@@ -566,6 +675,64 @@ def effective_welch_params(analyzer: HRVFreqDomainAnalysis) -> Tuple[Optional[in
     if nperseg < 8:
         return None, None
     return nperseg, int(nperseg * analyzer.overlap_ratio)
+
+
+def safe_welch_params_for_signal(
+    path: Path,
+    n_samples: int,
+    requested_nperseg: int,
+    requested_noverlap: int,
+) -> Tuple[int, int, Optional[Dict[str, Any]]]:
+    effective_nperseg = int(requested_nperseg)
+    neurokit_short_window_rule_applied = False
+    if effective_nperseg > int(n_samples) / 2:
+        effective_nperseg = int(int(n_samples) / 2)
+        neurokit_short_window_rule_applied = True
+    if effective_nperseg < MIN_EFFECTIVE_WELCH_SAMPLES:
+        raise ValidationSkip(
+            "insufficient_effective_length_for_welch",
+            (
+                "Effective Welch signal length is too short for reliable "
+                "frequency-domain HRV validation."
+            ),
+            {
+                "requested_nperseg": int(requested_nperseg),
+                "requested_noverlap": int(requested_noverlap),
+                "effective_nperseg": int(effective_nperseg),
+                "n_samples": int(n_samples),
+                "minimum_effective_nperseg": int(MIN_EFFECTIVE_WELCH_SAMPLES),
+                "neurokit_short_window_rule_applied": bool(
+                    neurokit_short_window_rule_applied
+                ),
+            },
+        )
+
+    effective_noverlap = min(int(requested_noverlap), max(0, effective_nperseg - 1))
+    adjustment = None
+    if (
+        effective_noverlap != int(requested_noverlap)
+        or effective_nperseg != int(requested_nperseg)
+    ):
+        adjustment = file_event(
+            path,
+            "adjusted_noverlap_for_short_signal",
+            (
+                "Effective Welch parameters were adjusted for a short signal so "
+                "noverlap < nperseg."
+            ),
+            processed=True,
+            details={
+                "requested_nperseg": int(requested_nperseg),
+                "requested_noverlap": int(requested_noverlap),
+                "effective_nperseg": int(effective_nperseg),
+                "effective_noverlap": int(effective_noverlap),
+                "n_samples": int(n_samples),
+                "neurokit_short_window_rule_applied": bool(
+                    neurokit_short_window_rule_applied
+                ),
+            },
+        )
+    return effective_nperseg, effective_noverlap, adjustment
 
 
 def detrended_ar_input(analyzer: HRVFreqDomainAnalysis) -> Optional[np.ndarray]:
@@ -690,6 +857,7 @@ def apply_matching_detrend_ms(
 
 
 def neurokit2_welch_psd(
+    path: Path,
     rr_ms: np.ndarray,
     sampling_rate: float,
     interpolation_method: str,
@@ -698,7 +866,7 @@ def neurokit2_welch_psd(
     noverlap: int,
     detrend_method: Optional[str],
     detrend_lambda: float,
-) -> Tuple[np.ndarray, np.ndarray, int, int, float]:
+) -> Tuple[np.ndarray, np.ndarray, int, int, float, Optional[Dict[str, Any]]]:
     import neurokit2 as nk
 
     rri_time = rr_start_times_s(rr_ms)
@@ -709,16 +877,14 @@ def neurokit2_welch_psd(
         interpolation_rate=sampling_rate,
         method=interpolation_method,
     )
-    intervals = apply_matching_detrend_ms(
-        np.asarray(intervals, dtype=float),
-        detrend_method,
-        detrend_lambda,
-    )
+    intervals = np.asarray(intervals, dtype=float)
 
-    effective_nperseg = min(int(nperseg), len(intervals))
-    effective_noverlap = min(int(noverlap), max(0, effective_nperseg - 1))
-    if effective_nperseg < 8:
-        return np.array([]), np.array([]), effective_nperseg, effective_noverlap, 0.0
+    effective_nperseg, effective_noverlap, adjustment = safe_welch_params_for_signal(
+        path=path,
+        n_samples=len(intervals),
+        requested_nperseg=int(nperseg),
+        requested_noverlap=int(noverlap),
+    )
 
     psd = nk.signal_psd(
         intervals,
@@ -740,6 +906,91 @@ def neurokit2_welch_psd(
         effective_nperseg,
         effective_noverlap,
         duration_s,
+        adjustment,
+    )
+
+
+def validation_welch_psd_with_mode(
+    path: Path,
+    rr_ms: np.ndarray,
+    sampling_rate: float,
+    interpolation_method: str,
+    window_type: str,
+    nperseg: int,
+    noverlap: int,
+    detrend_method: Optional[str],
+    detrend_lambda: float,
+    welch_detrend_mode: str,
+) -> Tuple[np.ndarray, np.ndarray, int, int, float, Optional[Dict[str, Any]]]:
+    if welch_detrend_mode == "current":
+        return neurokit2_welch_psd(
+            path=path,
+            rr_ms=rr_ms,
+            sampling_rate=sampling_rate,
+            interpolation_method=interpolation_method,
+            window_type=window_type,
+            nperseg=nperseg,
+            noverlap=noverlap,
+            detrend_method=detrend_method,
+            detrend_lambda=detrend_lambda,
+        )
+
+    import neurokit2 as nk
+
+    rri_time = rr_start_times_s(rr_ms)
+    intervals, intervals_time, interpolation_rate = nk.intervals_process(
+        rr_ms,
+        intervals_time=rri_time,
+        interpolate=True,
+        interpolation_rate=sampling_rate,
+        method=interpolation_method,
+    )
+    intervals = apply_matching_detrend_ms(
+        np.asarray(intervals, dtype=float),
+        detrend_method,
+        detrend_lambda,
+    )
+
+    effective_nperseg, effective_noverlap, adjustment = safe_welch_params_for_signal(
+        path=path,
+        n_samples=len(intervals),
+        requested_nperseg=int(nperseg),
+        requested_noverlap=int(noverlap),
+    )
+    nfft = int(effective_nperseg * 2)
+    if welch_detrend_mode == "segment_linear":
+        signal_input = intervals
+        scipy_detrend: Any = "linear"
+    elif welch_detrend_mode == "global_then_none":
+        signal_input = apply_matching_detrend_ms(
+            intervals,
+            detrend_method,
+            detrend_lambda,
+        )
+        scipy_detrend = False
+    else:
+        raise ValueError(f"Unsupported welch_detrend_mode: {welch_detrend_mode}")
+
+    freqs, psd = signal.welch(
+        signal_input,
+        fs=interpolation_rate,
+        window=window_type,
+        nperseg=effective_nperseg,
+        noverlap=effective_noverlap,
+        nfft=nfft,
+        detrend=scipy_detrend,
+        scaling="density",
+        average="mean",
+    )
+    mask = (freqs >= -np.inf) & (freqs <= band_ranges()["total"][1])
+    duration_s = float(intervals_time[-1] - intervals_time[0]) if len(intervals_time) else 0.0
+    return (
+        freqs[mask],
+        psd[mask],
+        effective_nperseg,
+        effective_noverlap,
+        duration_s,
+        adjustment,
     )
 
 
@@ -797,7 +1048,9 @@ def safe_abs_error(native_value: float, reference_value: float) -> float:
     return abs(native_value - reference_value)
 
 
-def analyze_file(path: Path, args: argparse.Namespace) -> Tuple[List[Dict[str, object]], Optional[Dict[str, Any]]]:
+def analyze_file(
+    path: Path, args: argparse.Namespace
+) -> Tuple[List[Dict[str, object]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     detrend_method = normalize_detrend_method(args.detrend_method)
     raw_rr_ms = load_rr_intervals_ms(path)
 
@@ -826,29 +1079,49 @@ def analyze_file(path: Path, args: argparse.Namespace) -> Tuple[List[Dict[str, o
     )
 
     native_nperseg, native_noverlap = effective_welch_params(analyzer)
+    if native_nperseg is None or native_noverlap is None:
+        raise ValidationSkip(
+            "insufficient_effective_length_for_welch",
+            (
+                "Native effective Welch parameters could not be computed because "
+                "the resampled signal is too short for frequency-domain validation."
+            ),
+            {
+                "rr_count": int(len(raw_rr_ms)),
+                "resampled_sample_count": int(len(analyzer.time_domain_s)),
+                "minimum_effective_nperseg": int(MIN_EFFECTIVE_WELCH_SAMPLES),
+            },
+        )
     ar_order = effective_ar_order(analyzer)
+    file_events: List[Dict[str, Any]] = []
 
     rr_ms = analyzer.rr_intervals_ms
     native_duration_s = float(rr_start_times_s(rr_ms)[-1]) if len(rr_ms) > 1 else 0.0
     native_counts = band_bin_counts(analyzer.freqs)
 
-    if native_nperseg is None or native_noverlap is None:
-        nk_freqs = np.array([])
-        nk_psd = np.array([])
-        nk_nperseg = None
-        nk_noverlap = None
-        nk_duration_s = 0.0
-    else:
-        nk_freqs, nk_psd, nk_nperseg, nk_noverlap, nk_duration_s = neurokit2_welch_psd(
-            rr_ms=rr_ms,
-            sampling_rate=args.interpolation_rate,
-            interpolation_method=args.neurokit_interpolation_method,
-            window_type=args.window_type,
-            nperseg=native_nperseg,
-            noverlap=native_noverlap,
-            detrend_method=detrend_method,
-            detrend_lambda=args.detrend_lambda,
-        )
+    requested_nperseg = int(args.segment_length * args.interpolation_rate)
+    requested_noverlap = int(requested_nperseg * args.overlap_ratio)
+    (
+        nk_freqs,
+        nk_psd,
+        nk_nperseg,
+        nk_noverlap,
+        nk_duration_s,
+        nk_adjustment,
+    ) = validation_welch_psd_with_mode(
+        path=path,
+        rr_ms=rr_ms,
+        sampling_rate=args.interpolation_rate,
+        interpolation_method=args.neurokit_interpolation_method,
+        window_type=args.window_type,
+        nperseg=requested_nperseg,
+        noverlap=requested_noverlap,
+        detrend_method=detrend_method,
+        detrend_lambda=args.detrend_lambda,
+        welch_detrend_mode=args.welch_detrend_mode,
+    )
+    if nk_adjustment is not None:
+        file_events.append(nk_adjustment)
 
     nk_metrics = metrics_from_psd(nk_freqs, nk_psd)
     nk_counts = band_bin_counts(nk_freqs)
@@ -891,8 +1164,13 @@ def analyze_file(path: Path, args: argparse.Namespace) -> Tuple[List[Dict[str, o
             "neurokit2_bins_total": nk_counts["total"],
             "native_welch_nperseg": native_nperseg,
             "native_welch_noverlap": native_noverlap,
+            "neurokit2_requested_welch_nperseg": requested_nperseg,
+            "neurokit2_requested_welch_noverlap": requested_noverlap,
             "neurokit2_welch_nperseg": nk_nperseg,
             "neurokit2_welch_noverlap": nk_noverlap,
+            "neurokit2_welch_adjustment_reason": (
+                nk_adjustment["reason"] if nk_adjustment is not None else None
+            ),
             "effective_ar_order": ar_order,
             "rr_count": len(rr_ms),
             "native_recording_duration_s": native_duration_s,
@@ -903,6 +1181,7 @@ def analyze_file(path: Path, args: argparse.Namespace) -> Tuple[List[Dict[str, o
             "segment_length_s": args.segment_length,
             "overlap_ratio": args.overlap_ratio,
             "detrend_method": args.detrend_method,
+            "welch_detrend_mode": args.welch_detrend_mode,
             "neurokit2_interpolation_method": args.neurokit_interpolation_method,
         }
         if experimental_nfft is not None:
@@ -928,7 +1207,7 @@ def analyze_file(path: Path, args: argparse.Namespace) -> Tuple[List[Dict[str, o
                 }
             )
         rows.append(row)
-    return rows, diagnostics
+    return rows, diagnostics, file_events
 
 
 def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
@@ -949,7 +1228,7 @@ def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
 
 def main() -> None:
     args = parse_args()
-    input_paths = resolve_inputs(args.inputs, args.recursive)
+    input_paths, file_events = resolve_inputs(args.inputs, args.recursive)
     run_dir = prepare_run_directory(args.run_name, args.overwrite)
 
     rows: List[Dict[str, object]] = []
@@ -957,10 +1236,15 @@ def main() -> None:
     failures = []
     for path in input_paths:
         try:
-            file_rows, diagnostics = analyze_file(path, args)
+            file_rows, diagnostics, analysis_events = analyze_file(path, args)
             rows.extend(file_rows)
             if diagnostics is not None:
                 diagnostics_records.append(diagnostics)
+            file_events.extend(analysis_events)
+        except ValidationSkip as exc:
+            file_events.append(
+                file_event(path, exc.reason, exc.message, details=exc.details)
+            )
         except Exception as exc:
             failures.append((path, exc))
 
@@ -977,7 +1261,7 @@ def main() -> None:
 
     run_info_path = run_dir / "run_info.json"
     notes_path = run_dir / "notes.md"
-    write_json(run_info_path, build_run_info(args, input_paths, run_dir, failures))
+    write_json(run_info_path, build_run_info(args, input_paths, run_dir, failures, file_events))
     write_notes(
         notes_path,
         args,
@@ -986,10 +1270,23 @@ def main() -> None:
         rows,
         diagnostics_records,
         failures,
+        file_events,
     )
     output_files.extend([run_info_path, notes_path])
 
-    print(f"Wrote {len(rows)} comparison rows for {len(input_paths) - len(failures)} files: {output_path}")
+    skipped_count = sum(1 for event in file_events if not event.get("processed"))
+    adjusted_count = sum(
+        1
+        for event in file_events
+        if event.get("reason") == "adjusted_noverlap_for_short_signal"
+    )
+    processed_count = len({str(row.get("input_file")) for row in rows if row.get("input_file")})
+    print(f"Wrote {len(rows)} comparison rows for {processed_count} files: {output_path}")
+    if skipped_count or adjusted_count:
+        print(
+            f"Recorded {skipped_count} skipped files and "
+            f"{adjusted_count} Welch overlap adjustments in {run_info_path}"
+        )
 
     if failures:
         print("Failures:")

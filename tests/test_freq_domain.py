@@ -3,6 +3,7 @@ import numpy as np
 import warnings
 from unittest.mock import patch, Mock
 import matplotlib.pyplot as plt
+from scipy import signal
 import sys
 import os
 
@@ -1031,6 +1032,124 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         self.assertFalse(welch["whether_welch_shorten_if_short_applied"])
         self.assertEqual(welch["number_of_resampled_samples"], len(analyzer.time_domain_s))
         self.assertGreaterEqual(welch["number_of_segments"], 1)
+
+    def test_none_detrend_removes_welch_dc_mean(self):
+        """None detrending should not preserve the RR mean as a giant Welch DC spike."""
+        rr_ms = np.full(900, 800.0)
+        analyzer = HRVFreqDomainAnalysis(
+            rr_ms,
+            detrend_method=None,
+            segment_length=120.0,
+            overlap_ratio=0.75,
+            enable_diagnostics=True,
+        )
+
+        results = analyzer.get_results()
+        self.assertLess(results["vlf_power"], 1e-6)
+        self.assertLess(results["total_power"], 1e-6)
+
+        diagnostics = results["frequency_diagnostics"]
+        self.assertTrue(diagnostics["global_mean_removed_for_none_detrend"])
+        self.assertTrue(diagnostics["mean_removed_for_none_detrend"])
+        self.assertEqual(diagnostics["welch"]["detrend_method"], "global_mean_then_none")
+
+    def test_none_detrend_matches_explicit_global_mean_removed_welch_scale(self):
+        """None-mode Welch should match global mean removal followed by no segment detrend."""
+        analyzer = HRVFreqDomainAnalysis(
+            self.rr_intervals_ms,
+            detrend_method=None,
+            sampling_rate=4.0,
+            segment_length=120.0,
+            overlap_ratio=0.75,
+        )
+        nperseg = analyzer._welch_diagnostics["effective_nperseg"]
+        noverlap = analyzer._welch_diagnostics["effective_noverlap"]
+        freqs, psd_s2 = signal.welch(
+            analyzer.time_domain_s - np.mean(analyzer.time_domain_s),
+            fs=analyzer.sampling_rate,
+            window=analyzer._get_window(nperseg),
+            nperseg=nperseg,
+            noverlap=noverlap,
+            detrend=False,
+            scaling="density",
+            average="mean",
+        )
+
+        # The native PSD itself is the most direct comparison.
+        np.testing.assert_allclose(analyzer.freqs, freqs)
+        np.testing.assert_allclose(analyzer.psd, psd_s2 * 1e6, rtol=1e-10, atol=1e-10)
+
+    def test_linear_detrend_welch_behavior_matches_scipy_linear(self):
+        """Linear detrending should continue to use segment-wise SciPy linear detrending."""
+        analyzer = HRVFreqDomainAnalysis(
+            self.rr_intervals_ms,
+            detrend_method="linear",
+            sampling_rate=4.0,
+            segment_length=120.0,
+            overlap_ratio=0.75,
+        )
+        nperseg = analyzer._welch_diagnostics["effective_nperseg"]
+        noverlap = analyzer._welch_diagnostics["effective_noverlap"]
+        freqs, psd_s2 = signal.welch(
+            analyzer.time_domain_s,
+            fs=analyzer.sampling_rate,
+            window=analyzer._get_window(nperseg),
+            nperseg=nperseg,
+            noverlap=noverlap,
+            detrend="linear",
+            scaling="density",
+            average="mean",
+        )
+
+        np.testing.assert_allclose(analyzer.freqs, freqs)
+        np.testing.assert_allclose(analyzer.psd, psd_s2 * 1e6, rtol=1e-10, atol=1e-10)
+        self.assertEqual(analyzer._welch_diagnostics["detrend_method"], "linear")
+        self.assertFalse(analyzer._welch_diagnostics["mean_removed_for_none_detrend"])
+
+    def test_nonpositive_rr_intervals_are_removed_before_interpolation(self):
+        """Nonpositive intervals should not create duplicate interpolation time points."""
+        rr_ms = self.rr_intervals_ms.copy()
+        rr_ms[10] = 0.0
+        rr_ms[20] = -5.0
+        rr_ms[30] = np.nan
+        rr_ms[40] = np.inf
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            analyzer = HRVFreqDomainAnalysis(
+                rr_ms,
+                detrend_method=None,
+                enable_diagnostics=True,
+            )
+
+        results = analyzer.get_results()
+        diagnostics = results["frequency_diagnostics"]
+        self.assertEqual(diagnostics["invalid_rr_removed_count"], 4)
+        self.assertFalse(diagnostics["nonfinite_interpolated_signal"])
+        self.assertTrue(np.all(np.isfinite(analyzer.time_domain_s)))
+        self.assertGreater(results["total_power"], 0)
+        self.assertFalse(
+            results["vlf_power"] == 0.0
+            and results["lf_power"] == 0.0
+            and results["hf_power"] == 0.0
+        )
+        self.assertTrue(any("invalid RR intervals" in str(w.message) for w in caught))
+
+    def test_nonfinite_psd_returns_nan_metrics_not_false_zeros(self):
+        """Non-finite PSD values should not become all-zero physiological powers."""
+        analyzer = HRVFreqDomainAnalysis(self.rr_intervals_ms)
+        analyzer.freqs = np.array([0.0, 0.01, 0.04, 0.10, 0.20])
+        analyzer.psd = np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            metrics = analyzer._compute_spectral_metrics()
+
+        self.assertTrue(np.isnan(metrics["vlf_power"]))
+        self.assertTrue(np.isnan(metrics["lf_power"]))
+        self.assertTrue(np.isnan(metrics["hf_power"]))
+        self.assertTrue(np.isnan(metrics["total_power"]))
+        self.assertTrue(any("non-finite" in str(w.message) for w in caught))
 
 
 if __name__ == "__main__":

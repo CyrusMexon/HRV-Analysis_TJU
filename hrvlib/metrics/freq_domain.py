@@ -77,11 +77,20 @@ class HRVFreqDomainAnalysis:
         self._welch_diagnostics = {}
         self._fft_diagnostics = {}
         self._ar_diagnostics = {}
+        self._input_diagnostics = {
+            "invalid_rr_removed_count": 0,
+            "duplicate_time_points_detected": False,
+            "duplicate_time_points_removed_count": 0,
+            "nonfinite_interpolated_signal": False,
+        }
 
         self._validate_input()
 
         # Auto-detect RR units (seconds vs milliseconds vs microseconds).
-        mean_rr = np.mean(self.rr_intervals_ms) if self.rr_intervals_ms.size else 0.0
+        valid_for_units = self.rr_intervals_ms[
+            np.isfinite(self.rr_intervals_ms) & (self.rr_intervals_ms > 0)
+        ]
+        mean_rr = np.mean(valid_for_units) if valid_for_units.size else 0.0
         if mean_rr > 0:
             if mean_rr < 10:
                 warnings.warn(
@@ -101,12 +110,7 @@ class HRVFreqDomainAnalysis:
         if self.analysis_window is not None:
             self.rr_intervals_ms = self._apply_analysis_window(self.rr_intervals_ms)
 
-        # Basic sanity checks on rr_intervals
-        if np.any(np.isnan(self.rr_intervals_ms)):
-            warnings.warn(
-                "RR intervals contain NaN values; these will be removed before analysis."
-            )
-            self.rr_intervals_ms = self.rr_intervals_ms[~np.isnan(self.rr_intervals_ms)]
+        self.rr_intervals_ms = self._sanitize_rr_intervals(self.rr_intervals_ms)
 
         # Keep a quick print/log of length for debugging
         # (You can remove/replace with logger in production)
@@ -119,6 +123,8 @@ class HRVFreqDomainAnalysis:
             clip_rr=self.clip_rr_resampled,
             clip_range=self.rr_clip_range,
         )
+        self.time_domain = self.time_domain_s
+        self.rr_intervals = self.rr_intervals_ms
         self._smoothness_priors_applied = False
         if self.detrend_method == "smoothness_priors":
             try:
@@ -184,6 +190,33 @@ class HRVFreqDomainAnalysis:
             )
         return rr_ms[mask]
 
+    def _sanitize_rr_intervals(self, rr_ms: np.ndarray) -> np.ndarray:
+        if len(rr_ms) == 0:
+            return rr_ms
+
+        rr_ms = np.asarray(rr_ms, dtype=float)
+        invalid_mask = ~np.isfinite(rr_ms) | (rr_ms <= 0)
+        invalid_count = int(np.count_nonzero(invalid_mask))
+        if invalid_count:
+            warnings.warn(
+                f"Removed {invalid_count} invalid RR intervals before frequency-domain analysis."
+            )
+            self._input_diagnostics["invalid_rr_removed_count"] = invalid_count
+
+        rr_s = rr_ms.astype(float) / 1000.0
+        time_points = np.concatenate([[0.0], np.cumsum(rr_s[:-1])]) if len(rr_s) else np.array([])
+        finite_time_points = time_points[np.isfinite(time_points)]
+        duplicate_count = int(len(finite_time_points) - len(np.unique(finite_time_points)))
+        if duplicate_count > 0:
+            warnings.warn(
+                "Duplicate RR cumulative time points detected before interpolation; "
+                "invalid nonpositive intervals will be removed."
+            )
+            self._input_diagnostics["duplicate_time_points_detected"] = True
+            self._input_diagnostics["duplicate_time_points_removed_count"] = duplicate_count
+
+        return rr_ms[~invalid_mask]
+
     def _create_time_domain_signal(
         self,
         rr_values_ms: np.ndarray,
@@ -241,6 +274,23 @@ class HRVFreqDomainAnalysis:
         resampled_rr_s = interp_func(new_time_axis)
         if clip_rr:
             resampled_rr_s = np.clip(resampled_rr_s, clip_range[0], clip_range[1])
+        if not np.all(np.isfinite(resampled_rr_s)):
+            self._input_diagnostics["nonfinite_interpolated_signal"] = True
+            warnings.warn(
+                "Interpolated RR signal contains non-finite values; attempting finite-value repair."
+            )
+            finite_mask = np.isfinite(resampled_rr_s)
+            if np.count_nonzero(finite_mask) >= 2:
+                resampled_rr_s = np.interp(
+                    new_time_axis,
+                    new_time_axis[finite_mask],
+                    resampled_rr_s[finite_mask],
+                )
+            else:
+                warnings.warn(
+                    "Interpolated RR signal has fewer than two finite samples. Returning empty signal."
+                )
+                return np.array([])
         return resampled_rr_s
 
     def _compute_welch_psd(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -285,6 +335,10 @@ class HRVFreqDomainAnalysis:
             "whether_welch_shorten_if_short_applied": bool(shorten_applied),
             "window_type": self.window_type,
             "detrend_method": self._effective_detrend_label(for_welch=True),
+            "global_mean_removed_for_none_detrend": bool(self.detrend_method is None),
+            "mean_removed_for_none_detrend": bool(self.detrend_method is None),
+            "nonfinite_psd": False,
+            "warning": None,
         }
         try:
             window = self._get_window(nperseg)
@@ -323,10 +377,18 @@ class HRVFreqDomainAnalysis:
                     average="mean",
                 )
         else:
-            detrend_param = self.detrend_method if self.detrend_method else False
+            if self.detrend_method is None:
+                # `None` means no trend model, but HRV band powers should not include
+                # the full RR mean as DC. Match the Kubios-favored convention by
+                # removing one global mean before Welch and disabling segment detrend.
+                signal_input = self.time_domain_s - np.mean(self.time_domain_s)
+                detrend_param = False
+            else:
+                signal_input = self.time_domain_s
+                detrend_param = self.detrend_method
             try:
                 freqs, psd_seconds = signal.welch(
-                    x=self.time_domain_s,
+                    x=signal_input,
                     fs=self.sampling_rate,
                     window=window,
                     nperseg=nperseg,
@@ -340,6 +402,10 @@ class HRVFreqDomainAnalysis:
                 return np.array([]), np.array([])
 
         psd_ms2 = psd_seconds * 1e6
+        if not np.all(np.isfinite(psd_ms2)):
+            self._welch_diagnostics["nonfinite_psd"] = True
+            self._welch_diagnostics["warning"] = "Welch PSD contains non-finite values."
+            warnings.warn("Welch PSD contains non-finite values.")
         if np.all(psd_ms2 == 0):
             warnings.warn("Welch PSD is zero everywhere. Check signal quality.")
         return freqs, psd_ms2
@@ -731,6 +797,8 @@ class HRVFreqDomainAnalysis:
                 return "smoothness_priors"
             return "linear"
         if self.detrend_method is None:
+            if for_welch:
+                return "global_mean_then_none"
             return "none"
         return str(self.detrend_method)
 
@@ -765,6 +833,10 @@ class HRVFreqDomainAnalysis:
             "whether_welch_shorten_if_short_applied": bool(shorten_applied),
             "window_type": self.window_type,
             "detrend_method": self._effective_detrend_label(for_welch=True),
+            "global_mean_removed_for_none_detrend": bool(self.detrend_method is None),
+            "mean_removed_for_none_detrend": bool(self.detrend_method is None),
+            "nonfinite_psd": False,
+            "warning": None,
         }
 
     def _empty_fft_diagnostics(
@@ -912,6 +984,28 @@ class HRVFreqDomainAnalysis:
             "band_definition_warnings": [
                 "ULF and VLF currently overlap; definitions are reported unchanged."
             ],
+            "global_mean_removed_for_none_detrend": bool(
+                self._welch_diagnostics.get("global_mean_removed_for_none_detrend", False)
+            ),
+            "mean_removed_for_none_detrend": bool(
+                self._welch_diagnostics.get("global_mean_removed_for_none_detrend", False)
+                or self._welch_diagnostics.get("mean_removed_for_none_detrend", False)
+            ),
+            "invalid_rr_removed_count": int(
+                self._input_diagnostics.get("invalid_rr_removed_count", 0)
+            ),
+            "duplicate_time_points_detected": bool(
+                self._input_diagnostics.get("duplicate_time_points_detected", False)
+            ),
+            "nonfinite_interpolated_signal": bool(
+                self._input_diagnostics.get("nonfinite_interpolated_signal", False)
+            ),
+            "nonfinite_psd": bool(
+                self._welch_diagnostics.get("nonfinite_psd", False)
+                or self._fft_diagnostics.get("nonfinite_psd", False)
+                or self._ar_diagnostics.get("nonfinite_psd", False)
+            ),
+            "input_quality": dict(self._input_diagnostics),
             "welch": dict(self._welch_diagnostics),
             "fft": dict(self._fft_diagnostics),
             "ar": dict(self._ar_diagnostics),
@@ -1013,6 +1107,13 @@ class HRVFreqDomainAnalysis:
             )
             return default_results
 
+        nan_results = {key: float("nan") for key in default_results}
+        if not np.all(np.isfinite(freqs)) or not np.all(np.isfinite(psd)):
+            warnings.warn(
+                "PSD contains non-finite values. Returning NaN spectral metrics."
+            )
+            return nan_results
+
         try:
             # Kubios-style total power: integrate 0.0-0.4 Hz (VLF+LF+HF)
             total_low = self.DEFAULT_FREQ_BANDS["vlf"][0]
@@ -1024,6 +1125,9 @@ class HRVFreqDomainAnalysis:
                 )
                 return default_results
             total_power = np.trapezoid(psd[total_mask], freqs[total_mask])
+            if not np.isfinite(total_power):
+                warnings.warn("Total power is non-finite. Returning NaN spectral metrics.")
+                return nan_results
             if total_power <= 0:
                 warnings.warn("Total power is zero or negative. Returning defaults.")
                 return default_results
@@ -1046,35 +1150,45 @@ class HRVFreqDomainAnalysis:
             else:
                 try:
                     band_power = np.trapezoid(psd[mask], freqs[mask])
-                    band_power = max(0.0, band_power)
+                    if not np.isfinite(band_power):
+                        warnings.warn(
+                            f"Power calculation for {band} band produced a non-finite value."
+                        )
+                        band_power = float("nan")
+                    else:
+                        band_power = max(0.0, band_power)
                 except Exception as e:
                     warnings.warn(f"Power calculation failed for {band} band: {e}")
-                    band_power = 0.0
+                    band_power = float("nan")
 
             band_pct_of_total = (
-                (band_power / total_power) * 100.0 if total_power > 0 else 0.0
+                (band_power / total_power) * 100.0
+                if np.isfinite(band_power) and total_power > 0
+                else float("nan")
             )
             results[f"{band}_power"] = band_power
             results[f"{band}_power_nu"] = band_pct_of_total
 
         lf_power = results.get("lf_power", 0.0)
         hf_power = results.get("hf_power", 0.0)
-        if hf_power > 1e-10:
+        if not np.isfinite(lf_power) or not np.isfinite(hf_power):
+            results["lf_hf_ratio"] = float("nan")
+        elif hf_power > 1e-10:
             results["lf_hf_ratio"] = lf_power / hf_power
         else:
             results["lf_hf_ratio"] = float("inf") if lf_power > 1e-10 else float("nan")
 
         lf_hf_sum = lf_power + hf_power
-        if lf_hf_sum > 0:
+        if np.isfinite(lf_hf_sum) and lf_hf_sum > 0:
             results["relative_lf_power"] = (lf_power / lf_hf_sum) * 100.0
             results["relative_hf_power"] = (hf_power / lf_hf_sum) * 100.0
             results["lf_nu"] = (lf_power / lf_hf_sum) * 100.0
             results["hf_nu"] = (hf_power / lf_hf_sum) * 100.0
         else:
-            results["relative_lf_power"] = 0.0
-            results["relative_hf_power"] = 0.0
-            results["lf_nu"] = 0.0
-            results["hf_nu"] = 0.0
+            results["relative_lf_power"] = float("nan")
+            results["relative_hf_power"] = float("nan")
+            results["lf_nu"] = float("nan")
+            results["hf_nu"] = float("nan")
 
         results["peak_freq_vlf"] = self._find_peak_frequency("vlf", freqs, psd)
         results["peak_freq_lf"] = self._find_peak_frequency("lf", freqs, psd)
@@ -1098,7 +1212,7 @@ class HRVFreqDomainAnalysis:
             return float("nan")
 
         low, high = band_range
-        mask = (freqs >= low) & (freqs <= high)
+        mask = (freqs >= low) & (freqs <= high) & np.isfinite(freqs) & np.isfinite(psd)
         if not np.any(mask):
             return float("nan")
 
@@ -1135,6 +1249,9 @@ class HRVFreqDomainAnalysis:
                 else 0
             ),
             "frequency_resolution_welch": (
+                (self.freqs[1] - self.freqs[0]) if len(self.freqs) > 1 else 0
+            ),
+            "frequency_resolution": (
                 (self.freqs[1] - self.freqs[0]) if len(self.freqs) > 1 else 0
             ),
             "frequency_resolution_fft": (

@@ -23,6 +23,10 @@ python tools/validate_freq_domain_neurokit2.py validation/processed_data/physion
 
 The runner writes outputs under `validation/runs/<run-name>/`, including `run_info.json`, `notes.md`, comparison rows, and optional diagnostics. Avoid passing manifest files such as `5min_manifest.csv` as RR input files.
 
+Known methodological issue: VLF / total_power comparison depends strongly on Welch detrending convention.
+
+HRV Studio currently uses segment-wise Welch detrending for linear mode. The NeuroKit2 validation path historically uses global detrending followed by Welch with `detrend=False`. This mainly affects DC / first VLF bins, so VLF and total_power can differ substantially even when LF, HF, and LF/HF remain closely aligned. A Kubios subset is still needed to decide which reference convention is preferred for final reporting.
+
 ## Analyzing a Run
 
 Use `tools/analyze_validation_run.py` after a validation run finishes.
