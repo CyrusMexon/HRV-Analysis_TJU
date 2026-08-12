@@ -287,6 +287,7 @@ def file_event(
 
 def hrv_settings(args: argparse.Namespace) -> Dict[str, Any]:
     return {
+        "band_convention": HRVFreqDomainAnalysis.DEFAULT_BAND_CONVENTION,
         "sampling_rate": args.interpolation_rate,
         "window_type": args.window_type,
         "segment_length": args.segment_length,
@@ -302,6 +303,7 @@ def hrv_settings(args: argparse.Namespace) -> Dict[str, Any]:
 
 def neurokit2_settings(args: argparse.Namespace) -> Dict[str, Any]:
     return {
+        "band_convention": HRVFreqDomainAnalysis.DEFAULT_BAND_CONVENTION,
         "interpolation_rate": args.interpolation_rate,
         "interpolation_method": args.neurokit_interpolation_method,
         "normalize": False,
@@ -585,6 +587,7 @@ def write_notes(
         ],
         "",
         "## Settings",
+        f"- band_convention = {settings['band_convention']}",
         f"- sampling_rate = {settings['sampling_rate']}",
         f"- window_type = {settings['window_type']}",
         f"- segment_length = {settings['segment_length']}",
@@ -774,42 +777,50 @@ def effective_ar_order(analyzer: HRVFreqDomainAnalysis) -> Optional[int]:
 
 
 def band_ranges() -> Dict[str, Tuple[float, float]]:
-    bands = dict(HRVFreqDomainAnalysis.DEFAULT_FREQ_BANDS)
+    bands = {
+        name: HRVFreqDomainAnalysis.band_spec_for_convention(name)
+        for name in ("ulf", "vlf", "lf", "hf")
+    }
+    total = HRVFreqDomainAnalysis.total_power_spec_for_convention()
     return {
-        "ulf": bands["ulf"],
-        "vlf": bands["vlf"],
-        "lf": bands["lf"],
-        "hf": bands["hf"],
-        "total": (bands["vlf"][0], bands["hf"][1]),
+        "ulf": (bands["ulf"]["low"], bands["ulf"]["high"]),
+        "vlf": (bands["vlf"]["low"], bands["vlf"]["high"]),
+        "lf": (bands["lf"]["low"], bands["lf"]["high"]),
+        "hf": (bands["hf"]["low"], bands["hf"]["high"]),
+        "total": (total["low"], total["high"]),
     }
 
 
-def count_bins(freqs: np.ndarray, low: float, high: float) -> int:
+def band_mask(freqs: np.ndarray, band: str) -> np.ndarray:
+    if band == "total":
+        return HRVFreqDomainAnalysis.total_power_mask_for_convention(freqs)
+    return HRVFreqDomainAnalysis.mask_for_band(freqs, band)
+
+
+def count_bins(freqs: np.ndarray, band: str) -> int:
     if len(freqs) == 0:
         return 0
-    return int(np.count_nonzero((freqs >= low) & (freqs <= high)))
+    return int(np.count_nonzero(band_mask(freqs, band)))
 
 
 def band_bin_counts(freqs: np.ndarray) -> Dict[str, int]:
-    ranges = band_ranges()
-    counts = {name: count_bins(freqs, low, high) for name, (low, high) in ranges.items()}
+    counts = {name: count_bins(freqs, name) for name in ("ulf", "vlf", "lf", "hf", "total")}
     counts["lf_hf"] = counts["lf"] + counts["hf"]
     return counts
 
 
-def integrate_band(freqs: np.ndarray, psd: np.ndarray, low: float, high: float) -> float:
-    mask = (freqs >= low) & (freqs <= high)
+def integrate_band(freqs: np.ndarray, psd: np.ndarray, band: str) -> float:
+    mask = band_mask(freqs, band)
     if not np.any(mask):
         return 0.0
     return float(max(0.0, np.trapezoid(psd[mask], freqs[mask])))
 
 
 def metrics_from_psd(freqs: np.ndarray, psd: np.ndarray) -> Dict[str, float]:
-    ranges = band_ranges()
-    vlf = integrate_band(freqs, psd, *ranges["vlf"])
-    lf = integrate_band(freqs, psd, *ranges["lf"])
-    hf = integrate_band(freqs, psd, *ranges["hf"])
-    total = integrate_band(freqs, psd, *ranges["total"])
+    vlf = integrate_band(freqs, psd, "vlf")
+    lf = integrate_band(freqs, psd, "lf")
+    hf = integrate_band(freqs, psd, "hf")
+    total = integrate_band(freqs, psd, "total")
 
     lf_hf = math.nan
     if hf > 1e-10:

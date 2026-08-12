@@ -213,6 +213,13 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
                 self.normal_preprocessing_result.corrected_rri, overlap_ratio=1.0
             )
 
+        # Invalid band convention
+        with self.assertRaises(ValueError):
+            HRVFreqDomainAnalysis(
+                self.normal_preprocessing_result.corrected_rri,
+                band_convention="invalid",
+            )
+
     def test_empty_rri_array(self):
         """Test behavior with empty RRI array"""
         with warnings.catch_warnings(record=True) as w:
@@ -344,6 +351,108 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
         rel_sum = results["relative_lf_power"] + results["relative_hf_power"]
         self.assertAlmostEqual(rel_sum, 100.0, delta=0.1)
 
+    def test_standard_band_convention_boundary_masks(self):
+        """Standard convention should use mutually exclusive physiological bands."""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+        freqs = np.array([0.0, 0.001, 0.0029, 0.003, 0.039, 0.04, 0.149, 0.15, 0.4])
+
+        ulf = analyzer._band_mask(freqs, "ulf")
+        vlf = analyzer._band_mask(freqs, "vlf")
+        lf = analyzer._band_mask(freqs, "lf")
+        hf = analyzer._band_mask(freqs, "hf")
+
+        self.assertFalse(ulf[0])  # DC excluded.
+        self.assertTrue(ulf[1])
+        self.assertTrue(ulf[2])
+        self.assertFalse(ulf[3])  # 0.003 belongs to VLF.
+        self.assertTrue(vlf[3])
+        self.assertTrue(vlf[4])
+        self.assertFalse(vlf[5])  # 0.04 belongs to LF.
+        self.assertTrue(lf[5])
+        self.assertTrue(lf[6])
+        self.assertFalse(lf[7])  # 0.15 belongs to HF.
+        self.assertTrue(hf[7])
+        self.assertTrue(hf[8])
+
+        summed_membership = ulf.astype(int) + vlf.astype(int) + lf.astype(int) + hf.astype(int)
+        self.assertLessEqual(np.max(summed_membership), 1)
+
+    def test_standard_total_power_excludes_dc(self):
+        """Standard total power should not include the exact 0-Hz bin."""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+        analyzer.freqs = np.array([0.0, 0.01, 0.02, 0.4])
+        analyzer.psd = np.array([1e9, 1.0, 1.0, 1.0])
+
+        metrics = analyzer._compute_spectral_metrics()
+
+        self.assertAlmostEqual(metrics["total_power"], 0.39, places=12)
+        self.assertAlmostEqual(metrics["vlf_power"], 0.01, places=12)
+
+    def test_kubios_compatible_mode_retains_legacy_vlf_and_total(self):
+        """Kubios-compatible convention should include DC in VLF and total power."""
+        standard = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            band_convention="standard",
+        )
+        kubios = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            band_convention="kubios_compatible",
+        )
+        freqs = np.array([0.0, 0.01, 0.02, 0.04, 0.4])
+        psd = np.array([1e9, 1.0, 1.0, 1.0, 1.0])
+        standard.freqs = freqs
+        standard.psd = psd
+        kubios.freqs = freqs
+        kubios.psd = psd
+
+        standard_metrics = standard._compute_spectral_metrics()
+        kubios_metrics = kubios._compute_spectral_metrics()
+
+        self.assertTrue(kubios._band_mask(freqs, "vlf")[0])
+        self.assertTrue(kubios._total_power_mask(freqs)[0])
+        self.assertGreater(kubios_metrics["vlf_power"], standard_metrics["vlf_power"] * 1000)
+        self.assertGreater(kubios_metrics["total_power"], standard_metrics["total_power"] * 1000)
+
+    def test_welch_fft_ar_all_use_selected_band_convention(self):
+        """All spectral estimators should route through the selected band masks."""
+        analyzer = HRVFreqDomainAnalysis(
+            self.normal_preprocessing_result.corrected_rri,
+            band_convention="standard",
+        )
+        freqs = np.array([0.0, 0.01, 0.02, 0.4])
+        psd = np.array([1e9, 1.0, 1.0, 1.0])
+        analyzer.freqs = freqs
+        analyzer.psd = psd
+        analyzer.fft_freqs = freqs
+        analyzer.fft_psd = psd
+        analyzer.ar_freqs = freqs
+        analyzer.ar_psd = psd
+
+        welch = analyzer._compute_spectral_metrics()
+        fft = analyzer._compute_spectral_metrics(use_fft=True)
+        ar = analyzer._compute_spectral_metrics(use_ar=True)
+
+        for metrics in (welch, fft, ar):
+            self.assertAlmostEqual(metrics["total_power"], 0.39, places=12)
+            self.assertAlmostEqual(metrics["vlf_power"], 0.01, places=12)
+
+    def test_derived_frequency_metric_identities(self):
+        """Derived normalized and ratio metrics should retain their identities."""
+        analyzer = HRVFreqDomainAnalysis(self.normal_preprocessing_result.corrected_rri)
+        analyzer.freqs = np.array([0.003, 0.02, 0.039, 0.04, 0.10, 0.149, 0.15, 0.30, 0.40])
+        analyzer.psd = np.array([1.0, 1.5, 1.2, 2.0, 4.0, 2.5, 3.0, 5.0, 4.0])
+
+        metrics = analyzer._compute_spectral_metrics()
+        lf_power = metrics["lf_power"]
+        hf_power = metrics["hf_power"]
+        lf_hf_sum = lf_power + hf_power
+
+        self.assertAlmostEqual(metrics["lf_hf_ratio"], lf_power / hf_power, places=12)
+        self.assertAlmostEqual(metrics["lf_nu"], lf_power / lf_hf_sum * 100.0, places=12)
+        self.assertAlmostEqual(metrics["hf_nu"], hf_power / lf_hf_sum * 100.0, places=12)
+        self.assertAlmostEqual(metrics["relative_lf_power"], metrics["lf_nu"], places=12)
+        self.assertAlmostEqual(metrics["relative_hf_power"], metrics["hf_nu"], places=12)
+
     def test_comprehensive_results_structure_with_preprocessing(self):
         """Test comprehensive structure of results with preprocessing data"""
         analyzer = HRVFreqDomainAnalysis(
@@ -388,10 +497,14 @@ class TestHRVFreqDomainAnalysis(unittest.TestCase):
             "frequency_resolution",
             "preprocessing_applied",
             "analysis_window",
+            "band_convention",
+            "band_definitions",
+            "total_power_definition",
         ]
 
         for field in expected_info_fields:
             self.assertIn(field, analysis_info)
+        self.assertEqual(analysis_info["band_convention"], "standard")
 
         # Test preprocessing_stats structure with real data
         self.assertIn("preprocessing_stats", results)

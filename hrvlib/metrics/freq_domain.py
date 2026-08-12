@@ -35,12 +35,96 @@ class HRVFreqDomainAnalysis:
         "nuttall",
     ]
     VALID_DETRENDS = ["linear", "constant", "smoothness_priors", None]
+    VALID_BAND_CONVENTIONS = ["standard", "kubios_compatible"]
+    DEFAULT_BAND_CONVENTION = "standard"
     DEFAULT_FREQ_BANDS = {
         "ulf": (0.0, 0.003),
-        "vlf": (0.0, 0.04),
+        "vlf": (0.003, 0.04),
         "lf": (0.04, 0.15),
         "hf": (0.15, 0.4),
         "lf_hf_ratio": (0.04, 0.4),
+    }
+    BAND_CONVENTIONS = {
+        "standard": {
+            "description": (
+                "Mutually exclusive physiological HRV bands with exact DC excluded."
+            ),
+            "bands": {
+                "ulf": {
+                    "low": 0.0,
+                    "high": 0.003,
+                    "include_low": False,
+                    "include_high": False,
+                },
+                "vlf": {
+                    "low": 0.003,
+                    "high": 0.04,
+                    "include_low": True,
+                    "include_high": False,
+                },
+                "lf": {
+                    "low": 0.04,
+                    "high": 0.15,
+                    "include_low": True,
+                    "include_high": False,
+                },
+                "hf": {
+                    "low": 0.15,
+                    "high": 0.4,
+                    "include_low": True,
+                    "include_high": True,
+                },
+            },
+            "total": {
+                "low": 0.0,
+                "high": 0.4,
+                "include_low": False,
+                "include_high": True,
+            },
+            "warnings": [],
+        },
+        "kubios_compatible": {
+            "description": (
+                "Comparator mode matching exported Kubios frequency powers; "
+                "use for external-software benchmarking only."
+            ),
+            "bands": {
+                "ulf": {
+                    "low": 0.0,
+                    "high": 0.003,
+                    "include_low": True,
+                    "include_high": True,
+                },
+                "vlf": {
+                    "low": 0.0,
+                    "high": 0.04,
+                    "include_low": True,
+                    "include_high": True,
+                },
+                "lf": {
+                    "low": 0.04,
+                    "high": 0.15,
+                    "include_low": True,
+                    "include_high": True,
+                },
+                "hf": {
+                    "low": 0.15,
+                    "high": 0.4,
+                    "include_low": True,
+                    "include_high": True,
+                },
+            },
+            "total": {
+                "low": 0.0,
+                "high": 0.4,
+                "include_low": True,
+                "include_high": True,
+            },
+            "warnings": [
+                "Kubios-compatible mode includes DC and overlapping boundary bins; use only for comparator benchmarking.",
+                "ULF in Kubios-compatible mode overlaps VLF and should not be interpreted as a separate disjoint physiological band.",
+            ],
+        },
     }
 
     def __init__(
@@ -59,6 +143,7 @@ class HRVFreqDomainAnalysis:
         welch_shorten_if_short: bool = True,
         analysis_window: Optional[Tuple[float, float]] = None,
         enable_diagnostics: bool = False,
+        band_convention: str = DEFAULT_BAND_CONVENTION,
     ):
         self.rr_intervals_ms = np.array(preprocessed_rri, dtype=float)
         self.preprocessing_result = preprocessing_result
@@ -74,6 +159,7 @@ class HRVFreqDomainAnalysis:
         self.welch_shorten_if_short = bool(welch_shorten_if_short)
         self.analysis_window = analysis_window
         self.enable_diagnostics = bool(enable_diagnostics)
+        self.band_convention = str(band_convention).lower()
         self._welch_diagnostics = {}
         self._fft_diagnostics = {}
         self._ar_diagnostics = {}
@@ -163,6 +249,11 @@ class HRVFreqDomainAnalysis:
         if self.window_type not in self.VALID_WINDOWS:
             raise ValueError(
                 f"Invalid window function: {self.window_type}. Valid options: {self.VALID_WINDOWS}"
+            )
+        if self.band_convention not in self.VALID_BAND_CONVENTIONS:
+            raise ValueError(
+                "Band convention must be one of: "
+                f"{self.VALID_BAND_CONVENTIONS}"
             )
         if self.segment_length <= 0:
             raise ValueError("Segment length must be positive")
@@ -899,6 +990,102 @@ class HRVFreqDomainAnalysis:
     def _frequency_spacing(freqs: np.ndarray) -> float:
         return float(freqs[1] - freqs[0]) if len(freqs) > 1 else 0.0
 
+    def _convention_spec(self) -> Dict:
+        return self.BAND_CONVENTIONS[self.band_convention]
+
+    def _band_spec(self, band: str) -> Dict:
+        return self._convention_spec()["bands"][band]
+
+    def _total_power_spec(self) -> Dict:
+        return self._convention_spec()["total"]
+
+    @staticmethod
+    def _mask_from_spec(freqs: np.ndarray, spec: Dict) -> np.ndarray:
+        low = spec["low"]
+        high = spec["high"]
+        low_mask = freqs >= low if spec["include_low"] else freqs > low
+        high_mask = freqs <= high if spec["include_high"] else freqs < high
+        return low_mask & high_mask
+
+    @classmethod
+    def band_spec_for_convention(
+        cls, band: str, convention: str = DEFAULT_BAND_CONVENTION
+    ) -> Dict:
+        convention = str(convention).lower()
+        if convention not in cls.VALID_BAND_CONVENTIONS:
+            raise ValueError(
+                "Band convention must be one of: "
+                f"{cls.VALID_BAND_CONVENTIONS}"
+            )
+        return cls.BAND_CONVENTIONS[convention]["bands"][band]
+
+    @classmethod
+    def total_power_spec_for_convention(
+        cls, convention: str = DEFAULT_BAND_CONVENTION
+    ) -> Dict:
+        convention = str(convention).lower()
+        if convention not in cls.VALID_BAND_CONVENTIONS:
+            raise ValueError(
+                "Band convention must be one of: "
+                f"{cls.VALID_BAND_CONVENTIONS}"
+            )
+        return cls.BAND_CONVENTIONS[convention]["total"]
+
+    @classmethod
+    def mask_for_band(
+        cls,
+        freqs: np.ndarray,
+        band: str,
+        convention: str = DEFAULT_BAND_CONVENTION,
+    ) -> np.ndarray:
+        return cls._mask_from_spec(
+            np.asarray(freqs),
+            cls.band_spec_for_convention(band, convention),
+        )
+
+    @classmethod
+    def total_power_mask_for_convention(
+        cls,
+        freqs: np.ndarray,
+        convention: str = DEFAULT_BAND_CONVENTION,
+    ) -> np.ndarray:
+        return cls._mask_from_spec(
+            np.asarray(freqs),
+            cls.total_power_spec_for_convention(convention),
+        )
+
+    def _band_mask(self, freqs: np.ndarray, band: str) -> np.ndarray:
+        return self._mask_from_spec(freqs, self._band_spec(band))
+
+    def _total_power_mask(self, freqs: np.ndarray) -> np.ndarray:
+        return self._mask_from_spec(freqs, self._total_power_spec())
+
+    @staticmethod
+    def _spec_interval_label(spec: Dict) -> str:
+        left = "[" if spec["include_low"] else "("
+        right = "]" if spec["include_high"] else ")"
+        return f"{left}{spec['low']}, {spec['high']}{right} Hz"
+
+    def _band_definition_payload(self, band: str) -> Dict[str, Union[float, bool, str]]:
+        spec = self._band_spec(band)
+        return {
+            "low_hz": float(spec["low"]),
+            "high_hz": float(spec["high"]),
+            "include_low": bool(spec["include_low"]),
+            "include_high": bool(spec["include_high"]),
+            "interval": self._spec_interval_label(spec),
+        }
+
+    def _total_power_definition_payload(self) -> Dict[str, Union[float, bool, str]]:
+        spec = self._total_power_spec()
+        return {
+            "low_hz": float(spec["low"]),
+            "high_hz": float(spec["high"]),
+            "include_low": bool(spec["include_low"]),
+            "include_high": bool(spec["include_high"]),
+            "interval": self._spec_interval_label(spec),
+        }
+
     def _duration_warnings(self, duration_seconds: float) -> list:
         warnings_list = []
         if duration_seconds < 60:
@@ -906,6 +1093,7 @@ class HRVFreqDomainAnalysis:
         if duration_seconds < 120:
             warnings_list.append("LF estimates should be interpreted cautiously.")
         if duration_seconds < 300:
+            warnings_list.append("ULF estimates are not reliable in short-term recordings.")
             warnings_list.append("VLF estimates are likely unreliable.")
         return warnings_list
 
@@ -930,8 +1118,8 @@ class HRVFreqDomainAnalysis:
     ) -> Dict[str, Dict[str, Union[float, int, list]]]:
         diagnostics = {}
         for band in ["ulf", "vlf", "lf", "hf"]:
-            low, high = self.DEFAULT_FREQ_BANDS[band]
-            mask = (freqs >= low) & (freqs <= high)
+            spec = self._band_spec(band)
+            mask = self._band_mask(freqs, band)
             bin_count = int(np.count_nonzero(mask))
             if bin_count > 0:
                 band_freqs = freqs[mask]
@@ -954,8 +1142,11 @@ class HRVFreqDomainAnalysis:
             band_warnings.extend(self._band_duration_warnings(band, duration_seconds))
 
             diagnostics[band] = {
-                "low_hz": float(low),
-                "high_hz": float(high),
+                "low_hz": float(spec["low"]),
+                "high_hz": float(spec["high"]),
+                "include_low": bool(spec["include_low"]),
+                "include_high": bool(spec["include_high"]),
+                "interval": self._spec_interval_label(spec),
                 "band_power": band_power,
                 "bin_count": bin_count,
                 "first_bin_hz": first_bin,
@@ -972,18 +1163,18 @@ class HRVFreqDomainAnalysis:
         )
 
         band_definitions = {
-            band: {"low_hz": float(bounds[0]), "high_hz": float(bounds[1])}
-            for band, bounds in self.DEFAULT_FREQ_BANDS.items()
-            if band in ("ulf", "vlf", "lf", "hf")
+            band: self._band_definition_payload(band)
+            for band in ("ulf", "vlf", "lf", "hf")
         }
 
         diagnostics = {
             "duration_seconds": duration_seconds,
             "duration_warnings": self._duration_warnings(duration_seconds),
+            "band_convention": self.band_convention,
+            "band_convention_description": self._convention_spec()["description"],
             "band_definitions": band_definitions,
-            "band_definition_warnings": [
-                "ULF and VLF currently overlap; definitions are reported unchanged."
-            ],
+            "total_power_definition": self._total_power_definition_payload(),
+            "band_definition_warnings": list(self._convention_spec()["warnings"]),
             "global_mean_removed_for_none_detrend": bool(
                 self._welch_diagnostics.get("global_mean_removed_for_none_detrend", False)
             ),
@@ -1051,11 +1242,12 @@ class HRVFreqDomainAnalysis:
         if not np.isfinite(full) or full <= 0:
             return diagnostics
 
-        low = self.DEFAULT_FREQ_BANDS["vlf"][0]
-        high = self.DEFAULT_FREQ_BANDS["hf"][1]
-        mask_band = (freqs >= low) & (freqs <= high)
-        mask_below = freqs < low
-        mask_above = freqs > high
+        total_spec = self._total_power_spec()
+        low = total_spec["low"]
+        high = total_spec["high"]
+        mask_band = self._total_power_mask(freqs)
+        mask_below = freqs <= low if not total_spec["include_low"] else freqs < low
+        mask_above = freqs > high if total_spec["include_high"] else freqs >= high
 
         band_power = np.trapezoid(psd[mask_band], freqs[mask_band]) if np.any(mask_band) else 0.0
         below_power = np.trapezoid(psd[mask_below], freqs[mask_below]) if np.any(mask_below) else 0.0
@@ -1115,13 +1307,12 @@ class HRVFreqDomainAnalysis:
             return nan_results
 
         try:
-            # Kubios-style total power: integrate 0.0-0.4 Hz (VLF+LF+HF)
-            total_low = self.DEFAULT_FREQ_BANDS["vlf"][0]
-            total_high = self.DEFAULT_FREQ_BANDS["hf"][1]
-            total_mask = (freqs >= total_low) & (freqs <= total_high)
+            total_spec = self._total_power_spec()
+            total_mask = self._total_power_mask(freqs)
             if not np.any(total_mask):
                 warnings.warn(
-                    "No frequency points found in total power band [0.0, 0.4] Hz."
+                    "No frequency points found in total power band "
+                    f"{self._spec_interval_label(total_spec)}."
                 )
                 return default_results
             total_power = np.trapezoid(psd[total_mask], freqs[total_mask])
@@ -1137,14 +1328,14 @@ class HRVFreqDomainAnalysis:
 
         results = {"total_power": total_power}
 
-        for band, (low, high) in self.DEFAULT_FREQ_BANDS.items():
-            if band == "lf_hf_ratio":
-                continue
-            mask = (freqs >= low) & (freqs <= high)
+        for band in ("ulf", "vlf", "lf", "hf"):
+            spec = self._band_spec(band)
+            mask = self._band_mask(freqs, band)
 
             if not np.any(mask):
                 warnings.warn(
-                    f"No frequency points found in {band} band [{low}, {high}] Hz"
+                    "No frequency points found in "
+                    f"{band} band {self._spec_interval_label(spec)}"
                 )
                 band_power = 0.0
             else:
@@ -1207,12 +1398,10 @@ class HRVFreqDomainAnalysis:
         if len(freqs) == 0 or len(psd) == 0:
             return float("nan")
 
-        band_range = self.DEFAULT_FREQ_BANDS.get(band)
-        if band_range is None:
+        if band not in self._convention_spec()["bands"]:
             return float("nan")
 
-        low, high = band_range
-        mask = (freqs >= low) & (freqs <= high) & np.isfinite(freqs) & np.isfinite(psd)
+        mask = self._band_mask(freqs, band) & np.isfinite(freqs) & np.isfinite(psd)
         if not np.any(mask):
             return float("nan")
 
@@ -1265,6 +1454,13 @@ class HRVFreqDomainAnalysis:
             "clip_rr_resampled": self.clip_rr_resampled,
             "rr_clip_range_s": self.rr_clip_range,
             "welch_shorten_if_short": self.welch_shorten_if_short,
+            "band_convention": self.band_convention,
+            "band_convention_description": self._convention_spec()["description"],
+            "band_definitions": {
+                band: self._band_definition_payload(band)
+                for band in ("ulf", "vlf", "lf", "hf")
+            },
+            "total_power_definition": self._total_power_definition_payload(),
         }
 
         results["ar_psd_diagnostics"] = self._compute_psd_diagnostics(
@@ -1306,9 +1502,14 @@ class HRVFreqDomainAnalysis:
         bands = ["ulf", "vlf", "lf", "hf"]
         summary = {}
         for band in bands:
-            freq_range = self.DEFAULT_FREQ_BANDS[band]
             summary[band] = {
-                "frequency_range_hz": freq_range,
+                "frequency_range_hz": (
+                    self._band_spec(band)["low"],
+                    self._band_spec(band)["high"],
+                ),
+                "include_low": bool(self._band_spec(band)["include_low"]),
+                "include_high": bool(self._band_spec(band)["include_high"]),
+                "interval": self._spec_interval_label(self._band_spec(band)),
                 "absolute_power": self.spectral_metrics.get(f"{band}_power", 0.0),
                 "relative_power_pct": self.spectral_metrics.get(
                     f"{band}_power_nu", 0.0

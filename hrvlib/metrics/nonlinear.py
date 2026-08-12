@@ -106,12 +106,12 @@ class NonlinearHRVAnalysis:
             sd1 = np.sqrt(np.var(diff, ddof=1) / 2)
 
         # Calculate SD2 (standard deviation along line of identity)
-        # SD2 = sqrt(2 * SDNN² - 0.5 * SD1²)
+        # SD2 = sqrt(2 * SDNN² - SD1²)
         if len(self.rr_ms) == 1:
             sd2 = 0.0
         else:
             sdnn = np.std(self.rr_ms, ddof=1)
-            sd2_squared = 2 * sdnn**2 - 0.5 * sd1**2
+            sd2_squared = 2 * sdnn**2 - sd1**2
             sd2 = np.sqrt(max(sd2_squared, 0))  # Ensure non-negative
 
         # Calculate SD1/SD2 ratio

@@ -25,6 +25,11 @@ from hrvlib.ui.widgets import (
     HelpDialog,
     SessionManager,
 )
+from hrvlib.ui.theme import (
+    PUBLICATION_LIGHT_THEME,
+    apply_publication_theme,
+    mark_primary_button,
+)
 from hrvlib.ui.workers import PipelineWorker
 
 
@@ -56,11 +61,13 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         # Left control panel with scroll area
         self.control_panel = QtWidgets.QWidget()
+        self.control_panel.setObjectName("leftSidebar")
         self.control_panel.setMinimumWidth(430)
         self.control_panel.setMaximumWidth(600)
 
         # Create a scroll area for the entire control panel
         control_scroll = QtWidgets.QScrollArea()
+        control_scroll.setObjectName("leftSidebarScroll")
         control_scroll.setWidgetResizable(True)
         control_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         control_scroll.setHorizontalScrollBarPolicy(
@@ -69,19 +76,25 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
         # Widget that will go inside the scroll area
         control_content = QtWidgets.QWidget()
+        control_content.setObjectName("leftSidebarContent")
+        control_content.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Maximum,
+        )
         control_layout = QtWidgets.QVBoxLayout(control_content)
-        control_layout.setSpacing(10)
-        control_layout.setContentsMargins(5, 5, 5, 5)
+        control_layout.setSpacing(6)
+        control_layout.setContentsMargins(6, 6, 9, 6)
+        control_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
 
         # Metadata
         meta_group = QtWidgets.QGroupBox("File Information")
         meta_layout = QtWidgets.QVBoxLayout(meta_group)
-        meta_layout.setSpacing(3)
-        meta_layout.setContentsMargins(8, 10, 5, 5)
+        meta_layout.setSpacing(2)
+        meta_layout.setContentsMargins(6, 8, 5, 4)
         self.meta_panel = MetaPanel()
         meta_layout.addWidget(self.meta_panel)
-        meta_group.setMinimumHeight(180)  # Ensure adequate space for labels
-        meta_group.setMaximumHeight(220)  # Increased from 150
+        meta_group.setMinimumHeight(145)  # Compact but keeps file summary visible
+        meta_group.setMaximumHeight(165)
 
         # Parameters
         params_group = QtWidgets.QGroupBox("Analysis Parameters")
@@ -90,44 +103,48 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         self.params_widget = AnalysisParametersWidget()
         params_scroll.setWidget(self.params_widget)
         params_scroll.setWidgetResizable(True)
-        params_scroll.setMinimumHeight(300)  # Reduced from 450
-        params_scroll.setMaximumHeight(400)  # Add maximum height
+        params_scroll.setViewportMargins(0, 0, 4, 0)
+        params_scroll.setMinimumHeight(245)
+        params_scroll.setMaximumHeight(315)
         params_scroll.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         params_scroll.setHorizontalScrollBarPolicy(
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )  # Disable horizontal scrollbar
         params_layout.addWidget(params_scroll)
-        params_layout.setContentsMargins(5, 5, 5, 5)
+        params_layout.setContentsMargins(4, 4, 4, 4)
 
         # Quality assessment with compact layout
         quality_group = QtWidgets.QGroupBox("Quality Metrics")
         quality_layout = QtWidgets.QVBoxLayout(quality_group)
+        quality_layout.setContentsMargins(5, 8, 5, 5)
+        quality_layout.setSpacing(3)
         self.quality_widget = QualityAssessmentWidget()
         quality_layout.addWidget(self.quality_widget)
-        quality_group.setMaximumHeight(280)  # Limit quality widget height
+        quality_group.setMaximumHeight(195)
 
         # Control buttons
         button_group = QtWidgets.QGroupBox("Analysis Control")
-        button_layout = QtWidgets.QVBoxLayout(button_group)
-        button_layout.setSpacing(8)
-        button_layout.setContentsMargins(5, 10, 5, 5)
+        button_layout = QtWidgets.QHBoxLayout(button_group)
+        button_layout.setSpacing(6)
+        button_layout.setContentsMargins(6, 8, 6, 5)
         self.analyze_btn = QtWidgets.QPushButton("🔬 Run Analysis")
         self.analyze_btn.setEnabled(False)
-        self.analyze_btn.setMinimumHeight(32)  # Reduced from 40
-        self.analyze_btn.setMaximumHeight(35)
+        mark_primary_button(self.analyze_btn)
+        self.analyze_btn.setMinimumHeight(30)
+        self.analyze_btn.setMaximumHeight(34)
         self.export_btn = QtWidgets.QPushButton("📄 Export Results")
         self.export_btn.setEnabled(False)
-        self.export_btn.setMinimumHeight(32)  # Reduced from 40
-        self.export_btn.setMaximumHeight(35)
+        mark_primary_button(self.export_btn)
+        self.export_btn.setMinimumHeight(30)
+        self.export_btn.setMaximumHeight(34)
         button_layout.addWidget(self.analyze_btn)
         button_layout.addWidget(self.export_btn)
-        button_group.setMaximumHeight(110)  # Reduced from 140
+        button_group.setMaximumHeight(72)
 
         control_layout.addWidget(meta_group)
         control_layout.addWidget(params_group)
         control_layout.addWidget(quality_group)
         control_layout.addWidget(button_group)
-        control_layout.addStretch()
 
         # Set the control content as the scroll area's widget
         control_scroll.setWidget(control_content)
@@ -556,21 +573,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         button_layout = QtWidgets.QHBoxLayout()
 
         export_btn = QtWidgets.QPushButton("Export")
-        export_btn.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """
-        )
+        mark_primary_button(export_btn)
         export_btn.setDefault(True)
 
         cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -905,9 +908,7 @@ class HRVMainWindow(QtWidgets.QMainWindow):
         # Buttons
         button_layout = QtWidgets.QHBoxLayout()
         load_btn = QtWidgets.QPushButton("Load Session")
-        load_btn.setStyleSheet(
-            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 8px; }"
-        )
+        mark_primary_button(load_btn)
         cancel_btn = QtWidgets.QPushButton("Cancel")
 
         button_layout.addStretch()
@@ -1106,6 +1107,8 @@ class HRVMainWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    if PUBLICATION_LIGHT_THEME:
+        apply_publication_theme(app)
     window = HRVMainWindow()
     window.show()
     sys.exit(app.exec())

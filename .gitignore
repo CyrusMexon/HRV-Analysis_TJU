@@ -48,12 +48,29 @@ validation/**/*.png
 validation/**/*.jpg
 validation/**/*.jpeg
 validation/**/*.pdf
+validation/**/*.svg
+validation/**/*.mat
+
+validation/kubios_subset/input_ascii_rr/
+validation/kubios_subset/kubios_exports*/
+validation/kubios_subset/parsed_results*/
+validation/kubios_subset/smoothness_priors_pilot*/
 
 # Keep lightweight validation documentation and notes tracked
 !validation/README_validation.md
 !validation/research_notes/
 !validation/research_notes/**
 !validation/**/.gitkeep
+validation/research_notes/**/*.csv
+validation/research_notes/**/*.json
+validation/research_notes/**/*.png
+validation/research_notes/**/*.jpg
+validation/research_notes/**/*.jpeg
+validation/research_notes/**/*.pdf
+validation/research_notes/**/*.svg
+validation/research_notes/**/*.bak.md
+validation/research_notes/**/__pycache__/
+validation/research_notes/**/*.py[cod]
 
 # Local generated HRV exports and exploratory data files
 HRV_*_metrics.csv

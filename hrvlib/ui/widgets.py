@@ -20,6 +20,7 @@ from matplotlib.figure import Figure
 from hrvlib.data_handler import DataBundle
 from hrvlib.pipeline import HRVAnalysisResults
 from hrvlib.ui.plots import plot_pipeline_results
+from hrvlib.ui.theme import mark_primary_button, mark_segmented_radio
 
 
 class MetaPanel(QtWidgets.QFrame):
@@ -28,8 +29,8 @@ class MetaPanel(QtWidgets.QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QtWidgets.QFormLayout(self)
-        self.layout.setSpacing(5)  # Spacing between rows
-        self.layout.setContentsMargins(5, 5, 5, 5)  # Margins
+        self.layout.setSpacing(2)  # Compact spacing for screenshot-ready sidebar
+        self.layout.setContentsMargins(3, 3, 3, 3)  # Margins
         self.layout.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
         )
@@ -50,10 +51,10 @@ class MetaPanel(QtWidgets.QFrame):
         ):
             lbl = QtWidgets.QLabel("-")
             lbl.setStyleSheet(
-                "QLabel { color: #2c3e50; font-weight: bold; background-color: #ecf0f1; padding: 4px; border: 1px solid #bdc3c7; border-radius: 2px; }"
+                "QLabel { color: #2c3e50; font-weight: bold; background-color: #ecf0f1; padding: 2px 4px; border: 1px solid #bdc3c7; border-radius: 2px; }"
             )
             lbl.setWordWrap(True)  # Allow text to wrap if needed
-            lbl.setMinimumHeight(22)  # Ensure minimum height for readability
+            lbl.setMinimumHeight(18)  # Compact but readable in screenshots
             lbl.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Preferred,
@@ -182,7 +183,7 @@ class MetricSectionWidget(QtWidgets.QWidget):
         self.content_widget.setStyleSheet(
             """
             QWidget {
-                background-color: grey;
+                background-color: #f1f2f3;
                 border: none;
                 border-top: none;
             }
@@ -225,7 +226,7 @@ class TimeDomainWidget(MetricSectionWidget):
             """
             QTableWidget {
                 gridline-color: transparent;
-                background-color: grey;
+                background-color: #ffffff;
                 border: none;
                 color: #000000;
             }
@@ -349,7 +350,7 @@ class FrequencyDomainWidget(MetricSectionWidget):
             """
             QTableWidget {
                 gridline-color: transparent;
-                background-color: grey;
+                background-color: #ffffff;
                 border: none;
                 color: #000000;
             }
@@ -629,7 +630,7 @@ class NonlinearWidget(MetricSectionWidget):
             """
             QTableWidget {
                 gridline-color: #e0e0e0;
-                background-color: #C9CDCF;
+                background-color: #ffffff;
                 border: none;
                 color: #000000;
             }
@@ -713,7 +714,7 @@ class QualityAssessmentSectionWidget(MetricSectionWidget):
                 font-size: 11px;
                 font-weight: 600;
                 text-transform: uppercase;
-                background-color: #C9CDCF;
+                background-color: #eceeef;
                 color: #000000;
                 border: 1px solid #dee2e6;
             }
@@ -737,7 +738,7 @@ class QualityAssessmentSectionWidget(MetricSectionWidget):
             """
             QTableWidget {
                 gridline-color: #e0e0e0;
-                background-color: #C9CDCF;
+                background-color: #ffffff;
                 border: none;
                 color: #000000;
             }
@@ -920,7 +921,7 @@ class WarningsWidget(MetricSectionWidget):
         self.warnings_list.setStyleSheet(
             """
             QListWidget {
-                background-color: #C9CDCF;
+                background-color: #ffffff;
                 border: none;
                 padding: 8px;
                 color: #000000;
@@ -991,7 +992,7 @@ class ResultsPanel(QtWidgets.QScrollArea):
         header.setStyleSheet(
             """
             QLabel {
-                background-color: #C9CDCF;
+                background-color: #f1f2f3;
                 border: 1px solid #dee2e6;
                 border-radius: 8px;
                 padding: 30px;
@@ -1023,7 +1024,7 @@ class ResultsPanel(QtWidgets.QScrollArea):
         self.setStyleSheet(
             """
             QScrollArea {
-                background-color: #C9CDCF;
+                background-color: #e6e7e8;
                 border: none;
             }
         """
@@ -1067,9 +1068,9 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(
-            2, 2, 8, 2
+            3, 3, 16, 3
         )  # Extra right margin to account for scrollbar
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
         # Set size policy to prevent horizontal expansion
         self.setSizePolicy(
@@ -1080,6 +1081,12 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         # Analysis window group
         window_group = QtWidgets.QGroupBox("Analysis Window")
         window_layout = QtWidgets.QFormLayout(window_group)
+        window_layout.setContentsMargins(6, 9, 16, 6)
+        window_layout.setHorizontalSpacing(8)
+        window_layout.setVerticalSpacing(4)
+        window_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
 
         self.analysis_window_start = QtWidgets.QSpinBox()
         self.analysis_window_start.setRange(0, 3600)
@@ -1102,6 +1109,12 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         # Preprocessing group
         preprocess_group = QtWidgets.QGroupBox("Preprocessing Settings")
         preprocess_layout = QtWidgets.QFormLayout(preprocess_group)
+        preprocess_layout.setContentsMargins(6, 9, 16, 6)
+        preprocess_layout.setHorizontalSpacing(8)
+        preprocess_layout.setVerticalSpacing(4)
+        preprocess_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
 
         self.artifact_correction = QtWidgets.QCheckBox(
             "Enable automatic artifact correction"
@@ -1137,6 +1150,12 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         # Detrending group
         detrend_group = QtWidgets.QGroupBox("Detrending")
         detrend_layout = QtWidgets.QFormLayout(detrend_group)
+        detrend_layout.setContentsMargins(6, 9, 16, 6)
+        detrend_layout.setHorizontalSpacing(8)
+        detrend_layout.setVerticalSpacing(4)
+        detrend_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
 
         self.detrending_method = QtWidgets.QComboBox()
         self.detrending_method.addItems(["none", "constant", "linear", "smoothness_priors"])
@@ -1153,6 +1172,12 @@ class AnalysisParametersWidget(QtWidgets.QWidget):
         # Frequency domain group
         freq_group = QtWidgets.QGroupBox("Frequency Analysis")
         freq_layout = QtWidgets.QFormLayout(freq_group)
+        freq_layout.setContentsMargins(6, 9, 16, 6)
+        freq_layout.setHorizontalSpacing(8)
+        freq_layout.setVerticalSpacing(4)
+        freq_layout.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
 
         self.ar_model_order = QtWidgets.QSpinBox()
         self.ar_model_order.setRange(4, 32)
@@ -1249,13 +1274,13 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
 
     def setup_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(5)
+        layout.setSpacing(3)
         layout.setContentsMargins(0, 0, 0, 0)
 
         # Quality metrics - more compact
         metrics_layout = QtWidgets.QFormLayout()
-        metrics_layout.setSpacing(3)
-        metrics_layout.setContentsMargins(5, 5, 5, 5)
+        metrics_layout.setSpacing(2)
+        metrics_layout.setContentsMargins(4, 3, 4, 3)
 
         self.corrected_beats_label = QtWidgets.QLabel("0%")
         self.signal_quality_label = QtWidgets.QLabel("Unknown")
@@ -1272,7 +1297,8 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
         warnings_label.setStyleSheet("font-weight: bold; font-size: 10px;")
 
         self.warnings_list = QtWidgets.QListWidget()
-        self.warnings_list.setMaximumHeight(80)  # Reduced from 120
+        self.warnings_list.setMinimumHeight(48)
+        self.warnings_list.setMaximumHeight(64)
         self.warnings_list.setStyleSheet("font-size: 9px;")  # Smaller font
 
         # Status indicator
@@ -1280,7 +1306,7 @@ class QualityAssessmentWidget(QtWidgets.QWidget):
         self.status_indicator.setStyleSheet(
             "color: gray; font-weight: bold; font-size: 10px;"
         )
-        self.status_indicator.setMaximumHeight(25)
+        self.status_indicator.setMaximumHeight(20)
 
         layout.addLayout(metrics_layout)
         layout.addWidget(warnings_label)
@@ -1477,8 +1503,9 @@ class SignalViewerWidget(QtWidgets.QWidget):
         self.create_main_toolbar(layout)
 
         # Matplotlib figure with navigation
-        self.figure = Figure(figsize=(14, 12))
+        self.figure = Figure(figsize=(14, 12), facecolor="#ffffff")
         self.canvas = FigureCanvas(self.figure)
+        self.canvas.setStyleSheet("background-color: #ffffff; border: 1px solid #b8bdc2;")
         self.navbar = NavigationToolbar(self.canvas, self)
 
         # Status panel
@@ -1495,24 +1522,29 @@ class SignalViewerWidget(QtWidgets.QWidget):
         """Create main toolbar with view toggle and editing controls"""
         main_toolbar = QtWidgets.QFrame()
         main_toolbar.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
-        main_toolbar.setMaximumHeight(80)  # Limit toolbar height
+        main_toolbar.setMaximumHeight(118)
         toolbar_layout = QtWidgets.QHBoxLayout(main_toolbar)
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins
+        toolbar_layout.setContentsMargins(6, 6, 6, 6)
+        toolbar_layout.setSpacing(8)
 
         # View Mode Toggle
         view_group = QtWidgets.QGroupBox("View Mode")
-        view_group.setMaximumHeight(60)
+        view_group.setMaximumHeight(86)
+        view_group.setMinimumWidth(250)
         view_layout = QtWidgets.QHBoxLayout(view_group)
-        view_layout.setContentsMargins(5, 5, 5, 5)
+        view_layout.setContentsMargins(7, 13, 7, 7)
+        view_layout.setSpacing(6)
 
         self.view_toggle = QtWidgets.QButtonGroup()
 
         self.overview_btn = QtWidgets.QRadioButton("Analysis Overview")
         self.overview_btn.setChecked(True)
         self.overview_btn.setToolTip("Show comprehensive analysis plots")
+        mark_segmented_radio(self.overview_btn)
 
         self.editing_btn = QtWidgets.QRadioButton("Beat Editing")
         self.editing_btn.setToolTip("Interactive RR interval editing mode")
+        mark_segmented_radio(self.editing_btn)
 
         self.view_toggle.addButton(self.overview_btn, 0)
         self.view_toggle.addButton(self.editing_btn, 1)
@@ -1523,7 +1555,7 @@ class SignalViewerWidget(QtWidgets.QWidget):
         # Editing Controls (initially hidden)
         self.editing_controls = self.create_editing_controls()
         self.editing_controls.setVisible(False)
-        self.editing_controls.setMaximumHeight(60)
+        self.editing_controls.setMaximumHeight(100)
 
         toolbar_layout.addWidget(view_group)
         toolbar_layout.addWidget(self.editing_controls)
@@ -1538,13 +1570,17 @@ class SignalViewerWidget(QtWidgets.QWidget):
         """Create editing controls widget"""
         controls_widget = QtWidgets.QWidget()
         controls_layout = QtWidgets.QHBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(5, 5, 5, 5)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
 
         # Edit Mode Selection
         mode_group = QtWidgets.QGroupBox("Edit Mode")
-        mode_group.setMaximumHeight(60)
-        mode_layout = QtWidgets.QHBoxLayout(mode_group)
-        mode_layout.setContentsMargins(3, 3, 3, 3)
+        mode_group.setMaximumHeight(96)
+        mode_group.setMinimumWidth(270)
+        mode_layout = QtWidgets.QGridLayout(mode_group)
+        mode_layout.setContentsMargins(7, 13, 7, 7)
+        mode_layout.setHorizontalSpacing(5)
+        mode_layout.setVerticalSpacing(5)
 
         self.mode_group = QtWidgets.QButtonGroup()
 
@@ -1555,7 +1591,6 @@ class SignalViewerWidget(QtWidgets.QWidget):
         self.interpolate_btn = QtWidgets.QRadioButton("Interpolate")
         self.insert_btn = QtWidgets.QRadioButton("Insert")
 
-        # Make buttons smaller
         for btn in [
             self.select_btn,
             self.delete_btn,
@@ -1563,7 +1598,13 @@ class SignalViewerWidget(QtWidgets.QWidget):
             self.interpolate_btn,
             self.insert_btn,
         ]:
-            btn.setStyleSheet("QRadioButton { font-size: 9px; }")
+            btn.setMinimumHeight(26)
+            mark_segmented_radio(btn)
+        self.select_btn.setMinimumWidth(72)
+        self.delete_btn.setMinimumWidth(72)
+        self.move_btn.setMinimumWidth(66)
+        self.interpolate_btn.setMinimumWidth(92)
+        self.insert_btn.setMinimumWidth(66)
 
         self.mode_group.addButton(self.select_btn, 0)
         self.mode_group.addButton(self.delete_btn, 1)
@@ -1571,60 +1612,66 @@ class SignalViewerWidget(QtWidgets.QWidget):
         self.mode_group.addButton(self.interpolate_btn, 3)
         self.mode_group.addButton(self.insert_btn, 4)
 
-        mode_layout.addWidget(self.select_btn)
-        mode_layout.addWidget(self.delete_btn)
-        mode_layout.addWidget(self.move_btn)
-        mode_layout.addWidget(self.interpolate_btn)
-        mode_layout.addWidget(self.insert_btn)
+        mode_layout.addWidget(self.select_btn, 0, 0)
+        mode_layout.addWidget(self.delete_btn, 0, 1)
+        mode_layout.addWidget(self.move_btn, 0, 2)
+        mode_layout.addWidget(self.interpolate_btn, 1, 0, 1, 2)
+        mode_layout.addWidget(self.insert_btn, 1, 2)
 
         # Interpolation Method
         interp_group = QtWidgets.QGroupBox("Method")
-        interp_group.setMaximumHeight(60)
+        interp_group.setMaximumHeight(92)
+        interp_group.setMinimumWidth(145)
         interp_layout = QtWidgets.QHBoxLayout(interp_group)
-        interp_layout.setContentsMargins(3, 3, 3, 3)
+        interp_layout.setContentsMargins(7, 13, 7, 7)
+        interp_layout.setSpacing(5)
 
         self.linear_rb = QtWidgets.QRadioButton("Linear")
         self.cubic_rb = QtWidgets.QRadioButton("Cubic")
         self.cubic_rb.setChecked(True)
 
-        # Make smaller
-        self.linear_rb.setStyleSheet("QRadioButton { font-size: 9px; }")
-        self.cubic_rb.setStyleSheet("QRadioButton { font-size: 9px; }")
+        for btn in [self.linear_rb, self.cubic_rb]:
+            btn.setMinimumHeight(26)
+            mark_segmented_radio(btn)
 
         interp_layout.addWidget(self.linear_rb)
         interp_layout.addWidget(self.cubic_rb)
 
         # Action Buttons
         action_group = QtWidgets.QGroupBox("Actions")
-        action_group.setMaximumHeight(60)
-        action_layout = QtWidgets.QHBoxLayout(action_group)
-        action_layout.setContentsMargins(3, 3, 3, 3)
+        action_group.setMaximumHeight(96)
+        action_group.setMinimumWidth(220)
+        action_layout = QtWidgets.QGridLayout(action_group)
+        action_layout.setContentsMargins(7, 13, 7, 7)
+        action_layout.setHorizontalSpacing(6)
+        action_layout.setVerticalSpacing(5)
 
         self.apply_btn = QtWidgets.QPushButton("Apply")
         self.apply_btn.setEnabled(False)
-        self.apply_btn.setStyleSheet(
-            "QPushButton { background-color: #4CAF50; color: white; font-size: 9px; padding: 2px; }"
-        )
+        mark_primary_button(self.apply_btn)
 
         self.undo_btn = QtWidgets.QPushButton("Undo")
         self.undo_btn.setEnabled(False)
-        self.undo_btn.setStyleSheet("QPushButton { font-size: 9px; padding: 2px; }")
 
         self.reset_btn = QtWidgets.QPushButton("Reset All")
-        self.reset_btn.setStyleSheet(
-            "QPushButton { background-color: #f44336; color: white; font-size: 9px; padding: 2px; s}"
-        )
 
         self.reanalyze_btn = QtWidgets.QPushButton("Reanalyze")
         self.reanalyze_btn.setEnabled(False)
-        self.reanalyze_btn.setStyleSheet(
-            "QPushButton { background-color: #2196F3; color: white; font-size: 9px; padding: 2px;}"
-        )
+        mark_primary_button(self.reanalyze_btn)
 
-        action_layout.addWidget(self.apply_btn)
-        action_layout.addWidget(self.undo_btn)
-        action_layout.addWidget(self.reset_btn)
-        action_layout.addWidget(self.reanalyze_btn)
+        for btn in [
+            self.apply_btn,
+            self.undo_btn,
+            self.reset_btn,
+            self.reanalyze_btn,
+        ]:
+            btn.setMinimumWidth(88)
+            btn.setMinimumHeight(26)
+
+        action_layout.addWidget(self.apply_btn, 0, 0)
+        action_layout.addWidget(self.undo_btn, 0, 1)
+        action_layout.addWidget(self.reset_btn, 1, 0)
+        action_layout.addWidget(self.reanalyze_btn, 1, 1)
 
         # Assemble controls
         controls_layout.addWidget(mode_group)
@@ -2620,9 +2667,7 @@ class ExportDialog(QtWidgets.QDialog):
 
         self.export_btn = QtWidgets.QPushButton("Export")
         self.export_btn.setDefault(True)
-        self.export_btn.setStyleSheet(
-            "QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 8px; }"
-        )
+        mark_primary_button(self.export_btn)
 
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
 

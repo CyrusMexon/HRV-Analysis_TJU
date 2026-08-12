@@ -581,5 +581,17 @@ class TestEdgeCases:
         assert 10 <= len(analyzer.rr_ms) < 500
 
 
+def test_poincare_sd2_standard_identity():
+    """SD2 should use the standard Poincare identity."""
+    data = [800, 810, 790, 830, 805, 795, 820, 815, 785, 825]
+    analyzer = NonlinearHRVAnalysis(data)
+    sd1, sd2, ratio, additional = analyzer.poincare_analysis()
+
+    sdnn = np.std(data, ddof=1)
+    expected_sd2 = np.sqrt(max(2 * sdnn**2 - sd1**2, 0))
+
+    assert sd2 == pytest.approx(expected_sd2)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
