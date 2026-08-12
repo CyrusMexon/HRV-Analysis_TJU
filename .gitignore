@@ -70,6 +70,24 @@ id_ed25519*
 .DS_Store
 Thumbs.db
 
+# Temporary and backup files
+tmp/
+temp/
+backup/
+backups/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+*.swp
+*.swo
+*.old
+*.save
+*.autosave
+*~
+
 # Manuscript/office working files
 *.doc
 *.docx
