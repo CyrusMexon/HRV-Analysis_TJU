@@ -21,6 +21,12 @@ local_config.*
 credentials.*
 secrets.*
 token.json
+token.*
+tokens.*
+access_token.*
+refresh_token.*
+auth_token.*
+api_token.*
 *.pem
 *.key
 *.p12
@@ -30,6 +36,8 @@ id_ed25519*
 *service-account*.json
 !credentials.example.*
 !secrets.example.*
+!token.example.*
+!tokens.example.*
 
 # IDE / Editor settings
 .vscode/
