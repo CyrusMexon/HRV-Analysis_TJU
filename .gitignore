@@ -78,6 +78,10 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
+log/
+*.out
+*.err
 
 # Test artifacts
 project_structure.txt
