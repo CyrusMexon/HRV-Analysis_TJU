@@ -9,6 +9,23 @@ pycache__/__init__.cpython-311.pyc
 env/
 venv/
 
+# Model checkpoints and serialized trained models
+checkpoints/
+checkpoint*/
+model_checkpoints/
+weights/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.h5
+*.keras
+*.joblib
+*.pkl
+*.pickle
+*.sav
+*.model
+
 # Local machine configuration
 .env
 .env.*
