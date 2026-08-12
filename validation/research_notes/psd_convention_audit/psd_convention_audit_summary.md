@@ -4,7 +4,7 @@ This validation-only audit recomputed diagnostic Welch PSD variants for the rema
 
 ## Inputs
 
-- Cleaned comparison CSV used: `D:\Team_Zhao_projects\HRV\HRV-Analysis_TJU\validation\research_notes\manual_review_sensitivity_analysis\cleaned_valid_only.csv`
+- Cleaned comparison CSV used: `validation/research_notes/manual_review_sensitivity_analysis/cleaned_valid_only.csv`
 - Cleaned CSV source: `fallback_manual_review_sensitivity_analysis`
 - Target files: OUT006, OUT003, OUT001, CH001, CH005
 - Settings: no detrending convention with one global mean removed, 4 Hz interpolation, 120 s segment length, 75% overlap, Hann window, VLF 0-0.04 Hz, LF 0.04-0.15 Hz, HF 0.15-0.40 Hz.

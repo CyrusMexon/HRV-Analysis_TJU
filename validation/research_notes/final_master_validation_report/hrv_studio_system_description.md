@@ -2,7 +2,7 @@
 
 Generated: 2026-06-15
 
-Repository inspected: `D:\Team_Zhao_projects\HRV\HRV-Analysis_TJU\`
+Repository inspected: repository root
 
 This document describes the implemented HRV Studio repository for manuscript Methods/System Design writing. It is based on repository inspection and does not rerun validation, modify production code, or use artifacts outside the HRV-Analysis_TJU project.
 
@@ -293,4 +293,3 @@ Visualization and reporting are integrated into the desktop workflow. The GUI di
 - The GUI exposes an artifact-correction checkbox, but pipeline parameter filtering appears to drop `artifact_correction_enabled` before calling `preprocess_rri`. This may prevent the checkbox from disabling correction.
 - The GUI file-open filter omits `.acq`, although `data_handler.py` implements a Biopac ACQ loader.
 - Some source comments and UI strings contain mojibake or garbled Unicode characters. This does not necessarily affect computation, but it can reduce documentation clarity.
-

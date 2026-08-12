@@ -97,9 +97,9 @@ The validation evidence supports cautious use of HRV Studio frequency-domain out
 
 ## MIT-BIH Arrhythmia Robustness Update (v11)
 
-- v11 run path: `D:\Team_Zhao_projects\HRV\HRV-Analysis_TJU\validation\runs\v11_mitbih_arrhythmia_robustness\`
-- Dataset path: `D:\Team_Zhao_projects\HRV\HRV-Analysis_TJU\validation\raw_data\mit_bih_arrhythmia\`
-- Script path: `D:\Team_Zhao_projects\HRV\HRV-Analysis_TJU\tools\mitbih_arrhythmia_robustness_study.py`
+- v11 run path: `validation/runs/v11_mitbih_arrhythmia_robustness/`
+- Dataset path: `validation/raw_data/mit_bih_arrhythmia/`
+- Script path: `tools/mitbih_arrhythmia_robustness_study.py`
 - Segments analyzed: 12.
 - Finite metrics before correction: 12/12.
 - Finite metrics after correction: 12/12.

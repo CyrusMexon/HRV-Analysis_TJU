@@ -2,7 +2,7 @@
 
 Generated: 2026-06-15
 
-Source of truth: `D:\Team_Zhao_projects\HRV\HRV-Analysis_TJU\`
+Source of truth: repository root
 
 This consolidated report uses only validation artifacts in the HRV-Analysis_TJU project. It does not use the old Glucose-HRV project, does not rerun experiments, and does not modify production HRV code.
 
@@ -177,4 +177,3 @@ See `master_validation_numbers_table.csv` in this folder.
 ## H. Validation Readiness Checklist
 
 See `validation_readiness_checklist.md` in this folder.
-
