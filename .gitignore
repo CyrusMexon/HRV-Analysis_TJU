@@ -46,6 +46,7 @@ test_psd_scaling.py
 test_data/to_csv.py
 
 # Notebook checkpoints
+*.ipynb
 .ipynb_checkpoints/
 
 # HRV validation local data and generated outputs
