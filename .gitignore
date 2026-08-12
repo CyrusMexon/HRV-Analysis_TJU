@@ -17,6 +17,20 @@ venv/
 *.local
 local_config.*
 
+# Credentials and private keys
+credentials.*
+secrets.*
+token.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*service-account*.json
+!credentials.example.*
+!secrets.example.*
+
 # IDE / Editor settings
 .vscode/
 .idea/
