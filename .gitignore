@@ -29,6 +29,16 @@ pipeline_trace.txt
 scan_components.py
 trace_pipeline.py
 
+# Local exploratory/debug scripts
+analyze_your_data.py
+batch_run_hrv_studio.py
+diagnostic_freq_domain.py
+test_detrending_your_data.py
+test_exact_kubios_settings.py
+test_kubios_settings.py
+test_psd_scaling.py
+test_data/to_csv.py
+
 # Notebook checkpoints
 .ipynb_checkpoints/
 
