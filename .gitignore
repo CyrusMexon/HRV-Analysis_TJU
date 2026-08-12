@@ -17,6 +17,12 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Manuscript/office working files
+*.doc
+*.docx
+*.rtf
+~$*
+
 # Logs
 *.log
 
