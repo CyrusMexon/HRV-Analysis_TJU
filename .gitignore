@@ -9,6 +9,14 @@ pycache__/__init__.cpython-311.pyc
 env/
 venv/
 
+# Local machine configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local
+local_config.*
+
 # IDE / Editor settings
 .vscode/
 .idea/
