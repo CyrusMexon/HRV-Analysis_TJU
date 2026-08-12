@@ -27,6 +27,9 @@ access_token.*
 refresh_token.*
 auth_token.*
 api_token.*
+api_key.*
+apikey.*
+api-key.*
 *.pem
 *.key
 *.p12
@@ -38,6 +41,9 @@ id_ed25519*
 !secrets.example.*
 !token.example.*
 !tokens.example.*
+!api_key.example.*
+!apikey.example.*
+!api-key.example.*
 
 # IDE / Editor settings
 .vscode/
