@@ -161,6 +161,9 @@ validation/research_notes/**/*.jpeg
 validation/research_notes/**/*.pdf
 validation/research_notes/**/*.svg
 validation/research_notes/**/*.bak.md
+validation/research_notes/**/manuscript_outline.md
+validation/research_notes/**/paper_results_draft.md
+validation/research_notes/**/recommended_paper_figures.md
 validation/research_notes/**/__pycache__/
 validation/research_notes/**/*.py[cod]
 
